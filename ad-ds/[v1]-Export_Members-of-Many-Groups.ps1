@@ -1,6 +1,6 @@
 <#
 This script is meant to fetch the attributes of members of multiple groups (of same domain)...
-If you wish to perform these steps on a list of multiple groups (of multiple domains), check out [v1.1] of this script.
+If you wish to perform these steps on a list of multiple groups (of multiple domains), check out "[v2]-Export_Members-of-Many-Groups.ps1"
 - - -
 
 Values within angle brackets <> are to be replaced by users with actual values...
