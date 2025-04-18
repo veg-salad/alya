@@ -29,7 +29,6 @@ You are free to use the code, but no warranties or guarantees are provided.
 /alya
 ├── ad-ds/             # Scripts related to Active Directory Domain Services
 ├── vmware-powercli/   # Scripts for managing VMware vSphere environments via PowerCLI
-├── .gitignore         # Git ignore rules for excluding files/directories
 ├── CHANGELOG.md       # Log of all notable changes and version history
 └── README.md          # Project overview and usage instructions
 ```
