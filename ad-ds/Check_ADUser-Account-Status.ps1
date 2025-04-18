@@ -1,6 +1,8 @@
 <#
 This script is meant to check status of User Accounts - whether they're Enabled or Disabled in AD.
 - - -
+
+DO NOT MODIFY CONTENTS OF THIS SCRIPT
 #>
 
 # Please provide a list of usernames only in the Users.txt input file...
