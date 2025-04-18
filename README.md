@@ -64,15 +64,7 @@ Make sure PowerShell 5.1+ or PowerShell Core (7+) is installed.
 
 ## 🧾 Versioning
 
-This repository uses **Git tags** for versioning.
-
-- The latest stable release is: **[v1.0](https://github.com/veg-salad/alya/releases/tag/v1.0)**
-- View all versions and changelogs in the [Releases](https://github.com/veg-salad/alya/releases) section.
-
-To use a specific version:
-```bash/cmd
-git checkout tags/v1.0
-```
+This repository tracks versioning of scripts in **CHANGELOG.md**.
 
 > Versions follow semantic versioning: `MAJOR.MINOR.PATCH`
 - `MAJOR`: Breaking changes
