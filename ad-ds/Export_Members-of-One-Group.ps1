@@ -41,6 +41,6 @@ foreach ($member in $Group.Members) {
 
 # This will export the data in a CSV file as "First Name, Last Name, Username, Email Address, Domain"
 # If an attribute doesn't have any value for the user in Active Directory, the entry for that column will be blank...
-$MemberAttribs | Export-Csv -Path "C:\path\to\OutputFile.csv" -NoTypeInformation
+$MemberAttribs | Export-Csv -Path <"C:\path\to\OutputFile.csv"> -NoTypeInformation
 
 # --- END OF SCRIPT ---

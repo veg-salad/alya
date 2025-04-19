@@ -8,7 +8,7 @@ PLEASE REMOVE ANGLE BRACKETS (<>) & DO NOT REMOVE DOUBLE QUOTES ("") WHEN YOU SU
 #>
 
 # Please provide the names of the Active Directory groups in a file named Groups.txt & their common respective <domain> here...
-$ListOfGroups = Get-Content -Path "C:\path\to\Groups.txt"
+$ListOfGroups = Get-Content -Path <"C:\path\to\Groups.txt">
 $ListOfGroups | ForEach-Object {
     $Group = Get-ADGroup $_ -Properties Members -Server <domain>
     $Domains = (Get-ADForest).Domains
@@ -44,7 +44,7 @@ $ListOfGroups | ForEach-Object {
     # If an attribute doesn't have any value for the user in Active Directory, the entry for that column will be blank...
     # Each group will have one CSV file named after itself...
     $group = $_
-    $MemberAttribs | Export-Csv -Path "C:\path\to\$group.csv" -NoTypeInformation
+    $MemberAttribs | Export-Csv -Path <"C:\path\to\$group.csv"> -NoTypeInformation              #DO NOT MODIFY FILE NAME in PATH
 }
 
 # --- END OF SCRIPT ---
