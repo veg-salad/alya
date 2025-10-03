@@ -1,6 +1,6 @@
 # Alya
 
-This repository contains a curated collection of PowerShell scripts designed for:
+This repository contains a curated collection of PowerShell scripts and batch files designed for:
 
 - **Active Directory Domain Services (AD DS)** administration and automation
 - **VMware vSphere** environment management using **PowerCLI**
@@ -30,7 +30,7 @@ You are free to use the code, but no warranties or guarantees are provided.
 /alya
 ├── ad-ds/             # Scripts related to Active Directory Domain Services
 ├── vmware-powercli/   # Scripts for managing VMware vSphere environments via PowerCLI
-├── windows-native/    # Scripts for managing native Windows services, scheduled tasks, etc.
+├── windows-native/    # PowerShell scripts and batch files for managing native Windows services, scheduled tasks, etc.
 └── README.md          # Project overview and usage instructions
 ```
 ---
