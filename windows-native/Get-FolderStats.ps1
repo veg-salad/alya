@@ -19,7 +19,7 @@
        - Input file path (containing folder paths)
        - Output CSV file path
     
-    Author: [Your Name]
+    Author: Areen Agrawal
     Version: 1.0
     Requires: PowerShell 5.0 or higher
 #>
