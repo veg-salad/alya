@@ -20,7 +20,7 @@
        - Source username (copying from)
        - Target username (pasting to)
     
-    Author: Updated script
+    Author: Areen Agrawal
     Version: 2.0
     Requires: ActiveDirectory PowerShell module
 #>

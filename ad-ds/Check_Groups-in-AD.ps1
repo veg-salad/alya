@@ -21,7 +21,7 @@
     
     Text file should contain one group name per line.
 
-    Author: Your Name
+    Author: Areen Agrawal
     Version: 1.0
     Requires: ActiveDirectory PowerShell module
 #>
