@@ -1,10 +1,29 @@
 <#
-This script checks the status of User Accounts across multiple domains and exports the results to CSV.
-It searches for users in multiple AD domains and retrieves their DisplayName, EmailAddress, and account status.
-- - -
+.SYNOPSIS
+    Checks Active Directory user account status across multiple domains.
 
-Values within angle brackets <> are to be replaced by users with actual values...
-PLEASE REMOVE ANGLE BRACKETS (<>) & DO NOT REMOVE DOUBLE QUOTES ("") WHEN YOU SUPPLY ACTUAL VALUES
+.DESCRIPTION
+    This script verifies the status of User Accounts across multiple domains and exports the results to CSV.
+    It searches for users in multiple AD domains and retrieves their DisplayName, EmailAddress, and account status.
+    The script handles service accounts by skipping those starting with "sa_" and processes admin accounts
+    by extracting the base username from patterns like "admt1_username".
+
+.PARAMETER inputFilePath
+    Path to text file containing usernames/SAMAccountNames (one per line)
+
+.PARAMETER outputCsvPath
+    Path for the results CSV file containing user account status information
+
+.EXAMPLE
+    .\Check_ADUser-Account-Status.ps1
+
+.NOTES
+    Author: Areen Agrawal
+    Version: 1.0
+    Requires: ActiveDirectory PowerShell module
+    
+    Values within angle brackets <> are to be replaced by users with actual values...
+    PLEASE REMOVE ANGLE BRACKETS (<>) & DO NOT REMOVE DOUBLE QUOTES ("") WHEN YOU SUPPLY ACTUAL VALUES
 #>
 
 # Define the path to the input file (list of usernames) and output CSV file
