@@ -29,7 +29,6 @@ You are free to use the code, but no warranties or guarantees are provided.
 /alya
 ├── ad-ds/             # Scripts related to Active Directory Domain Services
 ├── vmware-powercli/   # Scripts for managing VMware vSphere environments via PowerCLI
-├── CHANGELOG.md       # Log of all notable changes and version history
 └── README.md          # Project overview and usage instructions
 ```
 ---
@@ -61,12 +60,3 @@ Make sure PowerShell 5.1+ or PowerShell Core (7+) is installed.
    ```
 
 ---
-
-## 🧾 Versioning
-
-This repository tracks versioning of scripts in **CHANGELOG.md**.
-
-> Versions follow semantic versioning: `MAJOR.MINOR.PATCH`
-- `MAJOR`: Breaking changes
-- `MINOR`: New features, backward-compatible
-- `PATCH`: Bug fixes or improvements
