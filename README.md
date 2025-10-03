@@ -4,15 +4,16 @@ This repository contains a curated collection of PowerShell scripts designed for
 
 - **Active Directory Domain Services (AD DS)** administration and automation
 - **VMware vSphere** environment management using **PowerCLI**
+- **Windows Native** services and system management
 
-These scripts are crafted for system administrators and DevOps professionals aiming to streamline infrastructure operations across on-premises Windows Server domains and VMware environments.
+These scripts are crafted for system administrators and DevOps professionals aiming to streamline infrastructure operations across on-premises Windows Server domains, VMware environments, and native Windows systems.
 
 ---
 
 ## 📬 Author
 
-**Name:** Stefan Salvatore
-**Email:** whattheheck.stefan@gmail.com
+**Name:** Areen Agrawal
+**Email:** asyoulikeit747@gmail.com
 
 ---
 
@@ -29,6 +30,7 @@ You are free to use the code, but no warranties or guarantees are provided.
 /alya
 ├── ad-ds/             # Scripts related to Active Directory Domain Services
 ├── vmware-powercli/   # Scripts for managing VMware vSphere environments via PowerCLI
+├── windows-native/    # Scripts for managing native Windows services, scheduled tasks, etc.
 └── README.md          # Project overview and usage instructions
 ```
 ---
@@ -48,6 +50,8 @@ Make sure PowerShell 5.1+ or PowerShell Core (7+) is installed.
     ```powershell
     Install-Module -Name VMware.PowerCLI -Scope CurrentUser
     ```
+- For Windows Native scripts:
+  - Built-in Windows PowerShell modules (ScheduledTasks, etc.)
 
 ---
 
