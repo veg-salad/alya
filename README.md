@@ -18,7 +18,7 @@ Current areas covered:
 - **Windows Native** services and system management (PowerShell/batch)
 - **Nutanix Prism / AHV** validation automation and SOP guidance
 
-These scripts are crafted for system administrators and DevOps professionals aiming to streamline infrastructure operations across on-premises Windows Server domains, VMware environments, and native Windows systems.
+These scripts are crafted for system administrators and DevOps professionals aiming to streamline infrastructure operations across on-premises Windows Server domains, VMware environments, Nutanix Cloud Platform environments, and native Windows systems.
 
 ---
 
