@@ -1,6 +1,6 @@
 # Nutanix AHV VLAN Test (Interactive)
 
-## What this script does
+## Overview
 
 - Prompts interactively for Prism Central and guest credentials.
 - Prompts for test VM OS type (`Linux` or `Windows`) during runtime.
@@ -27,7 +27,7 @@
  	- Windows test VM: OpenSSH Server recommended; WinRM enabled as fallback; account with administrator rights for `Get-NetRoute`, `New-NetIPAddress`, and `Test-Connection`.
 - Reserved free IP per tested subnet/VLAN.
 
-## Install dependencies
+## Installation
 
 ```bash
 pip install -r requirements.txt
@@ -43,7 +43,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Input CSV schema
+## CSV Input Schema
 
 Required columns:
 
@@ -67,7 +67,7 @@ Notes:
 
 - `subnet_name` is optional and only for operator readability.
 
-## Run
+## Execution
 
 Dry run:
 
@@ -87,7 +87,7 @@ Manual per-cluster VM confirmation gate:
 python ahv_vlan_test.py --confirm-vm-per-cluster
 ```
 
-Flag interaction notes:
+Execution mode behavior:
 
 - `--preflight-only` exits after plan/validation (takes precedence over `--dry-run`).
 - `--confirm-vm-per-cluster` applies to actual run and `--dry-run`, not `--preflight-only`.
@@ -98,7 +98,7 @@ Actual run:
 python ahv_vlan_test.py
 ```
 
-The program prompts for:
+Interactive prompts:
 
 - Prism Central IP/FQDN, username, password
 - Test VM name
@@ -107,14 +107,14 @@ The program prompts for:
 - CSV path
 - Report path and runtime tuning values
 
-The program auto-detects guest interface name from the default route inside the guest.
+The script auto-detects guest interface name from the default route inside the guest.
 
 For Windows guests, remote execution order is:
 
 1. SSH PowerShell
 2. WinRM PowerShell fallback (if SSH path fails)
 
-## Validation behavior
+## Validation and Safety Controls
 
 Before running tests, the tool validates each CSV row against Prism subnet inventory:
 
@@ -127,24 +127,23 @@ During execution, the tool also validates cluster scope:
 - subnet cluster references (`clusterReferenceList` / `clusterReference`) must include the cluster under test
 - if not, that row is marked `FAIL` with stage `subnet_cluster_scope` and skipped
 
-VM targeting safety behavior:
+VM targeting controls:
 
 - exactly one VM with the provided test name must exist per cluster
 - if zero or multiple matches are found, that cluster is skipped with `vm_targeting` failure record
 - if the matched VM has more than one NIC, that cluster is skipped with `vm_nic_count` failure record
 
-Execution safety behavior:
+Execution confirmation controls:
 
 - non-dry-run execution requires a global `YES` confirmation after preflight summary
 - optional `--confirm-vm-per-cluster` requires `YES` per cluster and prints VM extId/NIC extId
 
 If any row fails validation, execution stops immediately.
 
-## Do's and Don'ts
-
-Operational cautions:
+## Operational Notes and Limitations
 
 - `--preflight-only` takes precedence if combined with `--dry-run`.
 - `--confirm-vm-per-cluster` applies to actual run and dry-run, not preflight-only.
 - A subnet row is skipped for a cluster if subnet cluster references do not include that cluster.
 - SSH host keys are auto-accepted in this version; run only in trusted network contexts.
+- Windows WinRM fallback currently uses default HTTP WinRM (`tcp/5985`) unless code is extended for custom HTTPS endpoint handling.
