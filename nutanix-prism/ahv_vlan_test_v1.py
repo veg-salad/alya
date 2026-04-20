@@ -13,6 +13,7 @@ Workflow:
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import getpass
 import json
@@ -26,6 +27,11 @@ from typing import Any, Dict, List, Optional
 
 import paramiko
 import requests
+
+try:
+    import winrm
+except Exception:
+    winrm = None
 
 API_PATHS = {
     "clusters": "/api/clustermgmt/v4.0/config/clusters",
@@ -188,6 +194,46 @@ def ssh_run(host: str, username: str, password: str, command: str, timeout: int)
         client.close()
 
 
+def ps_encoded(script: str) -> str:
+    data = script.encode("utf-16le")
+    return base64.b64encode(data).decode("ascii")
+
+
+def run_windows_ps(host: str, username: str, password: str, script: str, timeout: int) -> Dict[str, Any]:
+    errors: List[str] = []
+
+    # Try SSH first for consistency with current behavior.
+    try:
+        encoded = ps_encoded(script)
+        cmd = f"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+        result = ssh_run(host, username, password, cmd, timeout)
+        result["transport"] = "ssh"
+        return result
+    except Exception as exc:
+        errors.append(f"ssh: {exc}")
+
+    # Fallback to WinRM if SSH is unavailable.
+    if winrm is None:
+        raise RuntimeError(
+            "Windows guest command failed over SSH, and pywinrm is not installed for WinRM fallback"
+        )
+
+    try:
+        endpoint = f"http://{host}:5985/wsman"
+        session = winrm.Session(endpoint, auth=(username, password), transport="ntlm")
+        response = session.run_ps(script)
+        return {
+            "exit_code": int(response.status_code),
+            "stdout": response.std_out.decode("utf-8", errors="replace"),
+            "stderr": response.std_err.decode("utf-8", errors="replace"),
+            "transport": "winrm",
+        }
+    except Exception as exc:
+        errors.append(f"winrm: {exc}")
+
+    raise RuntimeError("Windows guest command failed over SSH and WinRM: " + " | ".join(errors))
+
+
 def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -287,17 +333,16 @@ def detect_guest_interface(host: str, user: str, password: str, timeout: int, gu
             raise RuntimeError(f"Could not parse interface from route output: {res['stdout'].strip()}")
         return match.group(1)
 
-    ps_cmd = (
-        "powershell -NoProfile -Command \""
+    ps_script = (
         "$r = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' "
         "| Sort-Object RouteMetric "
         "| Select-Object -First 1 -ExpandProperty InterfaceAlias; "
-        "if (-not $r) { exit 2 }; "
+        "if (-not $r) { Write-Error 'Default route not found'; exit 2 }; "
         "Write-Output $r"
-        "\""
     )
-    res = ssh_run(host, user, password, ps_cmd, timeout)
-    name = res["stdout"].strip()
+    res = run_windows_ps(host, user, password, ps_script, timeout)
+    lines = [ln.strip() for ln in res["stdout"].splitlines() if ln.strip()]
+    name = lines[0] if lines else ""
     if res["exit_code"] != 0 or not name:
         raise RuntimeError(res["stderr"] or res["stdout"] or "Failed to detect Windows interface")
     return name
@@ -324,8 +369,7 @@ def configure_guest_ip(
         return ssh_run(host, user, password, cmd, timeout)
 
     safe_iface = iface.replace("'", "''")
-    ps = (
-        "powershell -NoProfile -Command \""
+    ps_script = (
         f"$if='{safe_iface}'; "
         f"$ip='{ip_addr}'; "
         f"$gw='{gateway}'; "
@@ -335,9 +379,8 @@ def configure_guest_ip(
         "Get-NetRoute -InterfaceAlias $if -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue "
         "| Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; "
         "New-NetIPAddress -InterfaceAlias $if -IPAddress $ip -PrefixLength $p -DefaultGateway $gw -AddressFamily IPv4 -ErrorAction Stop | Out-Null"
-        "\""
     )
-    return ssh_run(host, user, password, ps, timeout)
+    return run_windows_ps(host, user, password, ps_script, timeout)
 
 
 def ping_gateway(
@@ -352,14 +395,12 @@ def ping_gateway(
     if guest_os == "linux":
         return ssh_run(host, user, password, f"ping -c {ping_count} -W 2 {gateway}", timeout)
 
-    ps = (
-        "powershell -NoProfile -Command \""
+    ps_script = (
         f"if (Test-Connection -ComputerName '{gateway}' -Count {ping_count} -Quiet) {{ "
         "Write-Output 'PASS'; exit 0 "
         "} else { Write-Output 'FAIL'; exit 1 }"
-        "\""
     )
-    return ssh_run(host, user, password, ps, timeout)
+    return run_windows_ps(host, user, password, ps_script, timeout)
 
 
 def main() -> int:

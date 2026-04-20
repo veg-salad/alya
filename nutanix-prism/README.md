@@ -9,6 +9,7 @@
 - Finds one pre-created test VM (same name) in each cluster.
 - Enforces exactly one NIC on the test VM (multi-NIC test VMs are not allowed).
 - Rebinds test VM NIC to each target subnet, auto-detects guest interface name using guest credentials, migrates across hosts, and pings gateway from inside guest.
+- For Windows guests, command execution tries SSH first and automatically falls back to PowerShell WinRM.
 - Produces CSV report with PASS/FAIL rows.
 
 ## Prerequisites
@@ -16,13 +17,14 @@
 - Python 3.9+ on the execution machine.
 - Network connectivity from execution machine to:
 	- Prism Central (`https://<pc>:9440`)
-	- guest test VM IPs over SSH (`tcp/22`) for Linux and Windows test VMs
+	- Linux guest test VM IPs over SSH (`tcp/22`)
+	- Windows guest test VM IPs over SSH (`tcp/22`) and/or WinRM (`tcp/5985`; `tcp/5986` if HTTPS WinRM is used)
 - Prism Central API credentials with rights for inventory read, VM NIC update, and VM migration.
 - One pre-created test VM in each cluster with the same VM name.
 - Test VM must have exactly one NIC.
 - Guest remote access requirements:
  	- Linux test VM: SSH enabled and account with `sudo` rights for `ip` and `ping`.
- 	- Windows test VM: OpenSSH Server enabled and account with administrator rights for `Get-NetRoute`, `New-NetIPAddress`, and `Test-Connection`.
+ 	- Windows test VM: OpenSSH Server recommended; WinRM enabled as fallback; account with administrator rights for `Get-NetRoute`, `New-NetIPAddress`, and `Test-Connection`.
 - Reserved free IP per tested subnet/VLAN.
 
 ## Install dependencies
@@ -30,6 +32,8 @@
 ```bash
 pip install -r requirements.txt
 ```
+
+`requirements.txt` includes `pywinrm` for Windows WinRM fallback.
 
 Optional (recommended) virtual environment setup:
 
@@ -104,6 +108,11 @@ The program prompts for:
 - Report path and runtime tuning values
 
 The program auto-detects guest interface name from the default route inside the guest.
+
+For Windows guests, remote execution order is:
+
+1. SSH PowerShell
+2. WinRM PowerShell fallback (if SSH path fails)
 
 ## Validation behavior
 
