@@ -423,7 +423,7 @@ def main() -> int:
     guest_user = prompt_non_empty("Guest Username: ")
     guest_pass = getpass.getpass("Guest Password: ")
     csv_path = prompt_non_empty("Path to subnet CSV (vlan_id,subnet_extid,free_ip): ")
-    report_path = input("Report CSV path [vlan_test_report_v1.csv]: ").strip() or "vlan_test_report_v1.csv"
+    report_path = input("Report CSV path [vlan_test_report.csv]: ").strip() or "vlan_test_report.csv"
     verify_tls = prompt_yes_no("Verify TLS certificates", default=False)
 
     settle_seconds = prompt_int("Settle seconds after NIC/migration [15]: ", default=15)

@@ -72,19 +72,19 @@ Notes:
 Dry run:
 
 ```bash
-python ahv_vlan_test_v1.py --dry-run
+python ahv_vlan_test.py --dry-run
 ```
 
 Preflight only (no mutation, plan printout only):
 
 ```bash
-python ahv_vlan_test_v1.py --preflight-only
+python ahv_vlan_test.py --preflight-only
 ```
 
 Manual per-cluster VM confirmation gate:
 
 ```bash
-python ahv_vlan_test_v1.py --confirm-vm-per-cluster
+python ahv_vlan_test.py --confirm-vm-per-cluster
 ```
 
 Flag interaction notes:
@@ -95,7 +95,7 @@ Flag interaction notes:
 Actual run:
 
 ```bash
-python ahv_vlan_test_v1.py
+python ahv_vlan_test.py
 ```
 
 The program prompts for:
