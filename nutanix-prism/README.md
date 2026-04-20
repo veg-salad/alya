@@ -1,36 +1,29 @@
-# AHV VLAN Test v1 (Interactive)
+# Nutanix AHV VLAN Test (Interactive)
 
 ## What this script does
 
-- Prompts interactively for Prism and guest credentials.
+- Prompts interactively for Prism Central and guest credentials.
+- Prompts for test VM OS type (`Linux` or `Windows`) during runtime.
 - Reads a CSV containing VLAN/subnet/test-IP rows.
-- Fetches AHV subnet inventory from Prism and validates CSV rows before execution.
+- Fetches AHV subnet inventory from Prism Central and validates CSV rows before execution.
 - Finds one pre-created test VM (same name) in each cluster.
-- Rebinds test VM NIC to each target subnet, migrates across hosts, and pings gateway from guest.
+- Enforces exactly one NIC on the test VM (multi-NIC test VMs are not allowed).
+- Rebinds test VM NIC to each target subnet, auto-detects guest interface name using guest credentials, migrates across hosts, and pings gateway from inside guest.
 - Produces CSV report with PASS/FAIL rows.
-
-## Operator runbook
-
-1. Confirm change window and verify test VMs are not production workloads.
-2. Prepare `subnet_input.csv` with `vlan_id,subnet_extid,free_ip` (reserved IPs only).
-3. Run `--preflight-only` and review planned clusters/subnets.
-4. Run `--dry-run` to simulate full execution and verify targeting/report layout.
-5. Run actual execution with `--confirm-vm-per-cluster` in shared/production environments.
-6. Review report CSV and remediate all `FAIL` rows before rerun.
 
 ## Prerequisites
 
-- Python 3.9+ on the execution host.
-- Network connectivity from execution host to:
+- Python 3.9+ on the execution machine.
+- Network connectivity from execution machine to:
 	- Prism Central (`https://<pc>:9440`)
-	- guest test VM IPs over SSH (`tcp/22`)
+	- guest test VM IPs over SSH (`tcp/22`) for Linux and Windows test VMs
 - Prism Central API credentials with rights for inventory read, VM NIC update, and VM migration.
 - One pre-created test VM in each cluster with the same VM name.
-- Guest SSH enabled on test VMs and a guest account with privileges for:
-	- `ip addr`
-	- `ip route`
-	- `ping`
-- Reserved free IP per tested subnet/VLAN (managed in IPAM).
+- Test VM must have exactly one NIC.
+- Guest remote access requirements:
+ 	- Linux test VM: SSH enabled and account with `sudo` rights for `ip` and `ping`.
+ 	- Windows test VM: OpenSSH Server enabled and account with administrator rights for `Get-NetRoute`, `New-NetIPAddress`, and `Test-Connection`.
+- Reserved free IP per tested subnet/VLAN.
 
 ## Install dependencies
 
@@ -69,7 +62,6 @@ vlan_id,subnet_extid,free_ip,subnet_name
 Notes:
 
 - `subnet_name` is optional and only for operator readability.
-- Use IPs reserved in your IPAM process.
 
 ## Run
 
@@ -106,10 +98,12 @@ The program prompts for:
 
 - Prism Central IP/FQDN, username, password
 - Test VM name
+- Test VM OS (`Linux` or `Windows`)
 - Guest SSH username/password
-- Guest interface name
 - CSV path
 - Report path and runtime tuning values
+
+The program auto-detects guest interface name from the default route inside the guest.
 
 ## Validation behavior
 
@@ -128,6 +122,7 @@ VM targeting safety behavior:
 
 - exactly one VM with the provided test name must exist per cluster
 - if zero or multiple matches are found, that cluster is skipped with `vm_targeting` failure record
+- if the matched VM has more than one NIC, that cluster is skipped with `vm_nic_count` failure record
 
 Execution safety behavior:
 
@@ -137,26 +132,6 @@ Execution safety behavior:
 If any row fails validation, execution stops immediately.
 
 ## Do's and Don'ts
-
-Do:
-
-- Run `--preflight-only` first, then `--dry-run`, then actual execution.
-- Use `--confirm-vm-per-cluster` for production or shared environments.
-- Reserve one known free IP per subnet/VLAN in IPAM and use only those in CSV.
-- Keep one dedicated test VM per cluster with the exact same test VM name.
-- Ensure test VM guest account has required privilege to run `ip addr` and `ip route` commands.
-- Verify guest SSH reachability for each test IP before live execution.
-- Use least-privilege Prism API credentials (inventory + NIC update + VM migrate scope only).
-- Review report output after each run and investigate all `FAIL` rows before rerun.
-
-Don't:
-
-- Do not run against a business VM or a VM with active production workload.
-- Do not reuse random/untracked free IPs; avoid IP conflict risk.
-- Do not assume `--dry-run` validates real network reachability (it validates flow only).
-- Do not disable the single-VM targeting rule by changing script logic casually.
-- Do not store credentials in plain text files or commit them to source control.
-- Do not run during maintenance/failover windows unless planned, as migration results may be noisy.
 
 Operational cautions:
 
