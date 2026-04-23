@@ -43,7 +43,7 @@ API_PATHS = {
     "vms": "/api/vmm/v4.0/ahv/config/vms",
     "vm_get": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}",
     "vm_nic_update": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}/nics/{nic_extid}",
-    "vm_migrate_action": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}/$actions/migrate",
+    "vm_migrate_action": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}/$actions/migrate-to-host",
 }
 
 DEFAULT_SETTLE_SECONDS = 15
