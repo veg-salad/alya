@@ -11,7 +11,8 @@ This follows the same logic as the script:
 3. Attach the test VM NIC to one subnet.
 4. Set the test IP inside the Windows guest.
 5. Ping the default gateway from inside the guest.
-6. Migrate the VM host-by-host and repeat the ping.
+6. Ping the test guest IP from the machine running the test.
+7. Migrate the VM host-by-host and repeat both pings.
 
 ## Scope
 
@@ -158,6 +159,18 @@ Pass criteria:
 
 - The command returns `True` or shows successful replies.
 
+### Step 6: Probe test guest from execution machine (baseline)
+
+From the machine where you are running the validation:
+
+```powershell
+Test-Connection -ComputerName <FREE_IP> -Count 3 -Quiet
+```
+
+Pass criteria:
+
+- The command returns `True` or shows successful replies.
+
 Record result as:
 
 - Cluster
@@ -167,31 +180,32 @@ Record result as:
 - Gateway
 - Ping result (PASS/FAIL)
 
-### Step 6: Migrate VM to Host 1 and retest
+### Step 7: Migrate VM to Host 1 and retest
 
 1. In Prism VM actions, select Live Migrate.
 2. Choose Host 1.
 3. Wait until VM placement shows Host 1.
 4. Wait 10-20 seconds.
 5. Run gateway ping again from guest.
+6. Run test guest ping again from execution machine.
 
 Pass criteria:
 
-- Gateway ping still successful.
+- Both pings are successful.
 
-### Step 7: Migrate VM to Host 2 and retest
+### Step 8: Migrate VM to Host 2 and retest
 
-Repeat Step 6 for Host 2.
+Repeat Step 7 for Host 2.
 
 Pass criteria:
 
-- Gateway ping successful on Host 2 as well.
+- Both pings successful on Host 2 as well.
 
-### Step 8: Repeat for next subnet
+### Step 9: Repeat for next subnet
 
 1. Re-attach VM NIC to next subnet.
 2. Reconfigure guest IP/route for that subnet.
-3. Repeat ping + migration checks.
+3. Repeat guest ping, execution-machine ping, and migration checks.
 
 ## Result Interpretation
 
@@ -213,6 +227,9 @@ Pass criteria:
 
 4. Migration succeeds but ping fails afterward:
    - Possible host-specific network path issue.
+
+5. Guest-to-gateway ping passes, but execution-machine-to-guest ping fails:
+   - Likely upstream routing/firewall/security path issue between execution machine and guest network.
 
 ## Comparison with Script Results
 

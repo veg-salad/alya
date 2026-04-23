@@ -8,7 +8,7 @@
 - Prints discovered clusters and asks which clusters to test.
 - Finds one pre-created Windows test VM (same name) in each selected cluster.
 - Enforces exactly one NIC on the test VM (multi-NIC test VMs are not allowed).
-- Rebinds test VM NIC to each target subnet, auto-detects guest interface name using guest credentials, migrates across hosts, and pings gateway from inside guest.
+- Rebinds test VM NIC to each target subnet, auto-detects guest interface name using guest credentials, migrates across hosts, pings gateway from inside guest, and pings the test guest IP from the machine running the script.
 - For Windows guests, command execution tries SSH first and automatically falls back to PowerShell WinRM.
 - Produces CSV report with PASS/FAIL rows.
 
@@ -18,6 +18,7 @@
 - Network connectivity from execution machine to:
 	- Prism Central (`https://<pc>:9440`)
 	- Windows guest test VM IPs over SSH (`tcp/22`) and/or WinRM (`tcp/5985`; `tcp/5986` if HTTPS WinRM is used)
+	- ICMP reachability from execution machine to test guest IPs
 - Prism Central API credentials with rights for inventory read, VM NIC update, and VM migration.
 - One pre-created Windows test VM in each selected cluster with the same VM name.
 - Test VM must have exactly one NIC.
@@ -138,6 +139,12 @@ Execution confirmation controls:
 - optional `--confirm-vm-per-cluster` requires `YES` per cluster and prints VM extId/NIC extId
 
 If any row fails validation, execution stops immediately.
+
+Probe behavior per migrated host:
+
+- Probe 1: gateway ping from inside the Windows guest.
+- Probe 2: test guest IP ping from the execution machine.
+- Result status is `PASS` only if both probes pass.
 
 ## Operational Notes and Limitations
 

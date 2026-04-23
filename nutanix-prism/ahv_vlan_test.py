@@ -18,6 +18,8 @@ import base64
 import csv
 import getpass
 import json
+import platform
+import subprocess
 import sys
 import time
 import uuid
@@ -421,6 +423,33 @@ def ping_gateway(
     return run_windows_ps(host, user, password, ps_script, timeout)
 
 
+def ping_guest_from_runner(target_ip: str, ping_count: int) -> Dict[str, Any]:
+    if platform.system().lower().startswith("win"):
+        cmd = ["ping", "-n", str(ping_count), "-w", "2000", target_ip]
+    else:
+        cmd = ["ping", "-c", str(ping_count), "-W", "2", target_ip]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(10, ping_count * 3),
+            check=False,
+        )
+        return {
+            "exit_code": int(result.returncode),
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    except Exception as exc:
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Interactive AHV VLAN validator")
     parser.add_argument("--dry-run", action="store_true", help="Only validate/discover, no changes")
@@ -709,7 +738,19 @@ def main() -> int:
                         ping_count,
                     )
 
-                    ok = ping_res["exit_code"] == 0
+                    runner_ping = ping_guest_from_runner(test["free_ip"], ping_count)
+
+                    guest_ok = ping_res["exit_code"] == 0
+                    runner_ok = runner_ping["exit_code"] == 0
+                    ok = guest_ok and runner_ok
+
+                    guest_detail = (ping_res["stderr"] or ping_res["stdout"]).strip()
+                    runner_detail = (runner_ping["stderr"] or runner_ping["stdout"]).strip()
+                    detail = (
+                        f"guest_gateway_ping={'PASS' if guest_ok else 'FAIL'}; "
+                        f"runner_to_guest_ping={'PASS' if runner_ok else 'FAIL'}; "
+                        f"guest_output={guest_detail}; runner_output={runner_detail}"
+                    )
                     record(
                         {
                             "cluster": cluster_name,
@@ -722,7 +763,7 @@ def main() -> int:
                             "gateway": test["gateway"],
                             "status": "PASS" if ok else "FAIL",
                             "stage": "icmp_probe",
-                            "detail": (ping_res["stdout"] if ok else (ping_res["stderr"] or ping_res["stdout"])).strip(),
+                            "detail": detail,
                         }
                     )
                 except Exception as exc:
