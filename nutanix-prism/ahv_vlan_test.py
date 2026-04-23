@@ -2,13 +2,14 @@
 """Interactive AHV VLAN validation tool (procedural version).
 
 Workflow:
-1. Prompt for Prism Central, Windows guest credentials, and runtime options.
+1. Prompt for Prism Central and Windows guest credentials.
 2. Validate CSV rows against Prism subnet inventory.
 3. Print all discovered clusters and ask which clusters to test.
 4. Find exactly one VM (by name) per selected cluster.
 5. Enforce exactly one VM NIC (multi-NIC test VMs are blocked).
 6. Rebind VM NIC to each target subnet, configure guest IP, migrate host-by-host.
-7. Ping gateway from inside guest and write CSV PASS/FAIL report.
+7. Run two probes per host: guest-to-gateway and runner-to-guest.
+8. Write CSV PASS/FAIL report.
 """
 
 from __future__ import annotations

@@ -37,7 +37,7 @@ Not in scope:
   - VM live migration
   - Network/subnet view
 - Dedicated test VM (not a production VM), with:
--  - SSH or WinRM access available
+   - SSH or WinRM access available
 - Windows guest credentials with administrative privileges to change IP and route.
 - Reserved free IPs for each subnet you test (from IPAM).
 - A small test plan table (subnet name, VLAN ID, subnet extId, free IP, gateway).
@@ -144,7 +144,7 @@ Replace:
 
 Pass criteria:
 
-- `eth0` shows correct IP/prefix.
+- The selected Windows interface shows correct IP/prefix.
 - Default route points to expected gateway.
 
 ### Step 5: Probe gateway from guest (baseline)
@@ -239,7 +239,8 @@ When comparing manual vs script output, match on:
 - Host
 - Subnet extId / VLAN ID
 - Test IP
-- Gateway probe result
+- Guest-to-gateway probe result
+- Runner-to-guest probe result
 
 If mismatch occurs:
 

@@ -103,7 +103,15 @@ Interactive prompts:
 - Windows Test VM name
 - Windows guest username/password
 - CSV path
-- Report path and runtime tuning values
+- Report path
+
+Runtime timings and probe settings use built-in defaults in this version:
+
+- settle seconds: `15`
+- ping count: `3`
+- API timeout: `45` seconds
+- guest connectivity timeout: `20` seconds
+- migration timeout: `300` seconds
 
 The script auto-detects guest interface name from the default route inside the guest.
 
