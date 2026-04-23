@@ -2,15 +2,16 @@
 
 ## Purpose
 
-Use this SOP to manually validate VLAN/subnet connectivity in Nutanix AHV for a small check (for example, 1-2 hosts) and compare outcomes with the automation script.
+Use this SOP to manually validate VLAN/subnet connectivity in Nutanix AHV for a small check (for example, 1-2 hosts) and compare outcomes with the Windows-only automation script.
 
 This follows the same logic as the script:
 
-1. Validate VLAN-to-subnet mapping.
-2. Attach test VM NIC to one subnet.
-3. Set test IP inside guest.
-4. Ping default gateway from inside guest.
-5. Migrate VM host-by-host and repeat ping.
+1. Review the available clusters and choose the target cluster or clusters.
+2. Validate VLAN-to-subnet mapping.
+3. Attach the test VM NIC to one subnet.
+4. Set the test IP inside the Windows guest.
+5. Ping the default gateway from inside the guest.
+6. Migrate the VM host-by-host and repeat the ping.
 
 ## Scope
 
@@ -26,7 +27,7 @@ Not in scope:
 ## Audience
 
 - Junior to mid-level sysadmins.
-- Basic familiarity with Prism Central navigation and Linux guest login.
+- Basic familiarity with Prism Central navigation and Windows guest login.
 
 ## Prerequisites
 
@@ -35,16 +36,15 @@ Not in scope:
   - VM live migration
   - Network/subnet view
 - Dedicated test VM (not a production VM), with:
-  - Nutanix Guest Tools installed (recommended)
-  - SSH or console login available
-- Guest credentials with privilege to change IP and route.
+-  - SSH or WinRM access available
+- Windows guest credentials with administrative privileges to change IP and route.
 - Reserved free IPs for each subnet you test (from IPAM).
 - A small test plan table (subnet name, VLAN ID, subnet extId, free IP, gateway).
 
 ## Dependencies / Tools
 
 - Web browser for Prism Central.
-- SSH client (PuTTY/PowerShell/OpenSSH) or Prism VM Console.
+- SSH client (PuTTY/PowerShell/OpenSSH) or PowerShell Remoting/WinRM access.
 - Notepad/Excel sheet to record results.
 
 ## Inputs You Need Before Starting
@@ -60,9 +60,9 @@ For each subnet/VLAN under test:
 
 For host checks:
 
-- Cluster name
+- Cluster name or names
 - 1-2 target AHV host names
-- Test VM name
+- Windows Test VM name
 
 ## Safety Checks (Do This First)
 
@@ -70,6 +70,16 @@ For host checks:
 2. Confirm you are in a maintenance-safe time window.
 3. Confirm free test IPs are reserved and not in use.
 4. Confirm you can log in to guest VM before making changes.
+
+## Cluster Selection
+
+Before testing, review the cluster list in Prism Central and choose the exact cluster or clusters you want to verify.
+
+Guidance:
+
+- If testing everything, note all discovered clusters.
+- If testing a subset, record only the selected cluster names.
+- Use the same cluster names when comparing manual results to script output.
 
 ## Step-by-Step Procedure
 
@@ -115,15 +125,14 @@ Pass criteria:
 
 ### Step 4: Configure guest IP for that subnet
 
-From SSH/console inside VM (Linux example):
+From PowerShell inside the Windows guest:
 
-```bash
-sudo ip addr flush dev eth0
-sudo ip addr add <FREE_IP>/<PREFIX> dev eth0
-sudo ip link set eth0 up
-sudo ip route replace default via <GATEWAY> dev eth0
-ip addr show dev eth0
-ip route
+```powershell
+Get-NetIPAddress -InterfaceAlias <INTERFACE> -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false
+Get-NetRoute -InterfaceAlias <INTERFACE> -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false
+New-NetIPAddress -InterfaceAlias <INTERFACE> -IPAddress <FREE_IP> -PrefixLength <PREFIX> -DefaultGateway <GATEWAY> -AddressFamily IPv4
+Get-NetIPAddress -InterfaceAlias <INTERFACE> -AddressFamily IPv4
+Get-NetRoute -InterfaceAlias <INTERFACE> -AddressFamily IPv4
 ```
 
 Replace:
@@ -139,15 +148,15 @@ Pass criteria:
 
 ### Step 5: Probe gateway from guest (baseline)
 
-Run:
+Run from the Windows guest:
 
-```bash
-ping -c 3 <GATEWAY>
+```powershell
+Test-Connection -ComputerName <GATEWAY> -Count 3 -Quiet
 ```
 
 Pass criteria:
 
-- 3/3 or stable successful replies.
+- The command returns `True` or shows successful replies.
 
 Record result as:
 

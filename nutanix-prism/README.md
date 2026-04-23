@@ -3,10 +3,10 @@
 ## Overview
 
 - Prompts interactively for Prism Central and guest credentials.
-- Prompts for test VM OS type (`Linux` or `Windows`) during runtime.
 - Reads a CSV containing VLAN/subnet/test-IP rows.
 - Fetches AHV subnet inventory from Prism Central and validates CSV rows before execution.
-- Finds one pre-created test VM (same name) in each cluster.
+- Prints discovered clusters and asks which clusters to test.
+- Finds one pre-created Windows test VM (same name) in each selected cluster.
 - Enforces exactly one NIC on the test VM (multi-NIC test VMs are not allowed).
 - Rebinds test VM NIC to each target subnet, auto-detects guest interface name using guest credentials, migrates across hosts, and pings gateway from inside guest.
 - For Windows guests, command execution tries SSH first and automatically falls back to PowerShell WinRM.
@@ -17,13 +17,11 @@
 - Python 3.9+ on the execution machine.
 - Network connectivity from execution machine to:
 	- Prism Central (`https://<pc>:9440`)
-	- Linux guest test VM IPs over SSH (`tcp/22`)
 	- Windows guest test VM IPs over SSH (`tcp/22`) and/or WinRM (`tcp/5985`; `tcp/5986` if HTTPS WinRM is used)
 - Prism Central API credentials with rights for inventory read, VM NIC update, and VM migration.
-- One pre-created test VM in each cluster with the same VM name.
+- One pre-created Windows test VM in each selected cluster with the same VM name.
 - Test VM must have exactly one NIC.
 - Guest remote access requirements:
- 	- Linux test VM: SSH enabled and account with `sudo` rights for `ip` and `ping`.
  	- Windows test VM: OpenSSH Server recommended; WinRM enabled as fallback; account with administrator rights for `Get-NetRoute`, `New-NetIPAddress`, and `Test-Connection`.
 - Reserved free IP per tested subnet/VLAN.
 
@@ -101,13 +99,14 @@ python ahv_vlan_test.py
 Interactive prompts:
 
 - Prism Central IP/FQDN, username, password
-- Test VM name
-- Test VM OS (`Linux` or `Windows`)
-- Guest SSH username/password
+- Windows Test VM name
+- Windows guest username/password
 - CSV path
 - Report path and runtime tuning values
 
 The script auto-detects guest interface name from the default route inside the guest.
+
+After inventory discovery, the script prints all cluster names and prompts for selection. Enter cluster numbers or names separated by commas, or `*` for all discovered clusters.
 
 For Windows guests, remote execution order is:
 

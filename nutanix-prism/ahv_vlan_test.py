@@ -2,12 +2,13 @@
 """Interactive AHV VLAN validation tool (procedural version).
 
 Workflow:
-1. Prompt for Prism Central, guest credentials, and runtime options.
+1. Prompt for Prism Central, Windows guest credentials, and runtime options.
 2. Validate CSV rows against Prism subnet inventory.
-3. Find exactly one VM (by name) per cluster.
-4. Enforce exactly one VM NIC (multi-NIC test VMs are blocked).
-5. Rebind VM NIC to each target subnet, configure guest IP, migrate host-by-host.
-6. Ping gateway from inside guest and write CSV PASS/FAIL report.
+3. Print all discovered clusters and ask which clusters to test.
+4. Find exactly one VM (by name) per selected cluster.
+5. Enforce exactly one VM NIC (multi-NIC test VMs are blocked).
+6. Rebind VM NIC to each target subnet, configure guest IP, migrate host-by-host.
+7. Ping gateway from inside guest and write CSV PASS/FAIL report.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import base64
 import csv
 import getpass
 import json
-import re
 import sys
 import time
 import uuid
@@ -43,6 +43,12 @@ API_PATHS = {
     "vm_migrate_action": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}/$actions/migrate",
 }
 
+DEFAULT_SETTLE_SECONDS = 15
+DEFAULT_PING_COUNT = 3
+DEFAULT_API_TIMEOUT = 45
+DEFAULT_SSH_TIMEOUT = 20
+DEFAULT_MIGRATION_TIMEOUT = 300
+
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -54,17 +60,6 @@ def prompt_non_empty(text: str) -> str:
         if value:
             return value
         print("Value is required.")
-
-
-def prompt_int(text: str, default: Optional[int] = None) -> int:
-    while True:
-        raw = input(text).strip()
-        if not raw and default is not None:
-            return default
-        try:
-            return int(raw)
-        except ValueError:
-            print("Please enter a valid integer.")
 
 
 def prompt_yes_no(text: str, default: bool) -> bool:
@@ -80,14 +75,61 @@ def prompt_yes_no(text: str, default: bool) -> bool:
         print("Please answer yes or no.")
 
 
-def prompt_guest_os() -> str:
+def prompt_cluster_selection(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not clusters:
+        raise RuntimeError("No clusters were discovered in Prism Central")
+
+    print("Discovered clusters:")
+    for index, cluster in enumerate(clusters, start=1):
+        name = cluster.get("name", "")
+        extid = cluster.get("extId", "")
+        print(f"  {index}. {name} ({extid})")
+
     while True:
-        raw = input("Test VM OS [Linux/Windows]: ").strip().lower()
-        if raw in {"linux", "l"}:
-            return "linux"
-        if raw in {"windows", "w"}:
-            return "windows"
-        print("Please enter Linux or Windows.")
+        raw = input("Select cluster numbers or names separated by comma, or * for all: ").strip()
+        if not raw:
+            print("Please select at least one cluster or use * for all.")
+            continue
+        if raw.lower() in {"*", "all"}:
+            return clusters
+
+        selected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        errors: List[str] = []
+
+        for token in [part.strip() for part in raw.split(",") if part.strip()]:
+            cluster: Optional[Dict[str, Any]] = None
+            if token.isdigit():
+                index = int(token)
+                if 1 <= index <= len(clusters):
+                    cluster = clusters[index - 1]
+                else:
+                    errors.append(token)
+                    continue
+            else:
+                matches = [c for c in clusters if c.get("name", "").lower() == token.lower()]
+                if len(matches) == 1:
+                    cluster = matches[0]
+                elif len(matches) > 1:
+                    errors.append(f"{token} (ambiguous)")
+                    continue
+                else:
+                    errors.append(token)
+                    continue
+
+            key = cluster.get("extId") or cluster.get("name")
+            if key and key not in seen:
+                selected.append(cluster)
+                seen.add(key)
+
+        if not selected or errors:
+            if errors:
+                print("Invalid cluster selection: " + ", ".join(errors))
+            else:
+                print("Please select at least one cluster.")
+            continue
+
+        return selected
 
 
 def init_session(pc_host: str, pc_user: str, pc_pass: str, verify_tls: bool) -> requests.Session:
@@ -322,17 +364,7 @@ def build_subnet_tests(csv_rows: List[Dict[str, str]], subnets: List[Dict[str, A
     return tests
 
 
-def detect_guest_interface(host: str, user: str, password: str, timeout: int, guest_os: str) -> str:
-    if guest_os == "linux":
-        cmd = "ip -o -4 route show default"
-        res = ssh_run(host, user, password, cmd, timeout)
-        if res["exit_code"] != 0:
-            raise RuntimeError(res["stderr"] or res["stdout"] or "Failed to detect default route")
-        match = re.search(r"\bdev\s+(\S+)", res["stdout"])
-        if not match:
-            raise RuntimeError(f"Could not parse interface from route output: {res['stdout'].strip()}")
-        return match.group(1)
-
+def detect_guest_interface(host: str, user: str, password: str, timeout: int) -> str:
     ps_script = (
         "$r = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' "
         "| Sort-Object RouteMetric "
@@ -353,21 +385,11 @@ def configure_guest_ip(
     user: str,
     password: str,
     timeout: int,
-    guest_os: str,
     iface: str,
     ip_addr: str,
     prefix: int,
     gateway: str,
 ) -> Dict[str, Any]:
-    if guest_os == "linux":
-        cmd = (
-            f"sudo ip addr flush dev {iface} && "
-            f"sudo ip addr add {ip_addr}/{prefix} dev {iface} && "
-            f"sudo ip link set {iface} up && "
-            f"sudo ip route replace default via {gateway} dev {iface}"
-        )
-        return ssh_run(host, user, password, cmd, timeout)
-
     safe_iface = iface.replace("'", "''")
     ps_script = (
         f"$if='{safe_iface}'; "
@@ -388,13 +410,9 @@ def ping_gateway(
     user: str,
     password: str,
     timeout: int,
-    guest_os: str,
     gateway: str,
     ping_count: int,
 ) -> Dict[str, Any]:
-    if guest_os == "linux":
-        return ssh_run(host, user, password, f"ping -c {ping_count} -W 2 {gateway}", timeout)
-
     ps_script = (
         f"if (Test-Connection -ComputerName '{gateway}' -Count {ping_count} -Quiet) {{ "
         "Write-Output 'PASS'; exit 0 "
@@ -418,19 +436,18 @@ def main() -> int:
     pc_host = prompt_non_empty("Prism Central IP/FQDN: ")
     pc_user = prompt_non_empty("Prism Username: ")
     pc_pass = getpass.getpass("Prism Password: ")
-    vm_name = prompt_non_empty("Test VM Name (same name across clusters): ")
-    guest_os = prompt_guest_os()
-    guest_user = prompt_non_empty("Guest Username: ")
-    guest_pass = getpass.getpass("Guest Password: ")
+    vm_name = prompt_non_empty("Windows Test VM Name (same name across clusters): ")
+    guest_user = prompt_non_empty("Windows Guest Username: ")
+    guest_pass = getpass.getpass("Windows Guest Password: ")
     csv_path = prompt_non_empty("Path to subnet CSV (vlan_id,subnet_extid,free_ip): ")
     report_path = input("Report CSV path [vlan_test_report.csv]: ").strip() or "vlan_test_report.csv"
     verify_tls = prompt_yes_no("Verify TLS certificates", default=False)
 
-    settle_seconds = prompt_int("Settle seconds after NIC/migration [15]: ", default=15)
-    ping_count = prompt_int("Ping count [3]: ", default=3)
-    api_timeout = prompt_int("API timeout seconds [45]: ", default=45)
-    ssh_timeout = prompt_int("Guest SSH timeout seconds [20]: ", default=20)
-    migration_timeout = prompt_int("Migration wait timeout seconds [300]: ", default=300)
+    settle_seconds = DEFAULT_SETTLE_SECONDS
+    ping_count = DEFAULT_PING_COUNT
+    api_timeout = DEFAULT_API_TIMEOUT
+    ssh_timeout = DEFAULT_SSH_TIMEOUT
+    migration_timeout = DEFAULT_MIGRATION_TIMEOUT
 
     run_id = str(uuid.uuid4())
     session = init_session(pc_host, pc_user, pc_pass, verify_tls)
@@ -444,6 +461,11 @@ def main() -> int:
     csv_rows = parse_subnet_csv(csv_path)
     subnet_tests = build_subnet_tests(csv_rows, subnets)
 
+    selected_clusters = prompt_cluster_selection(clusters)
+    print("Selected clusters:")
+    for cluster in selected_clusters:
+        print(f"  - {cluster.get('name', '')} ({cluster.get('extId', '')})")
+
     hosts_by_cluster: Dict[str, List[Dict[str, Any]]] = {}
     for host in hosts:
         cluster_id = host.get("cluster", {}).get("uuid")
@@ -455,11 +477,10 @@ def main() -> int:
     def record(row: Dict[str, Any]) -> None:
         row["timestamp_utc"] = now_utc()
         row["run_id"] = run_id
-        row["guest_os"] = guest_os
         report_rows.append(row)
 
     print(f"[{now_utc()}] Run ID: {run_id}")
-    print(f"[{now_utc()}] Planned clusters: {len(clusters)}")
+    print(f"[{now_utc()}] Planned clusters: {len(selected_clusters)} of {len(clusters)} discovered")
     print(f"[{now_utc()}] Planned subnet rows: {len(subnet_tests)}")
     for test in subnet_tests:
         print(
@@ -474,7 +495,6 @@ def main() -> int:
         fields = [
             "timestamp_utc",
             "run_id",
-            "guest_os",
             "cluster",
             "host",
             "test_vm",
@@ -497,7 +517,7 @@ def main() -> int:
         print("Execution cancelled by user.")
         return 0
 
-    for cluster in clusters:
+    for cluster in selected_clusters:
         cluster_name = cluster.get("name", "")
         cluster_extid = cluster.get("extId", "")
         if not cluster_extid:
@@ -565,7 +585,7 @@ def main() -> int:
                 f"  Test VM: {vm_name}\n"
                 f"  Test VM extId: {vm_extid}\n"
                 f"  Test NIC extId: {nic_extid}\n"
-                f"  Guest OS: {guest_os}"
+                "  Guest OS: Windows"
             )
             if input("Type YES to continue this cluster: ").strip() != "YES":
                 record(
@@ -628,13 +648,12 @@ def main() -> int:
                 rebind_vm_nic_subnet(session, vm_extid, nic_extid, test["subnet_extid"], api_timeout)
                 time.sleep(settle_seconds)
 
-                iface = detect_guest_interface(test["free_ip"], guest_user, guest_pass, ssh_timeout, guest_os)
+                iface = detect_guest_interface(test["free_ip"], guest_user, guest_pass, ssh_timeout)
                 cfg_res = configure_guest_ip(
                     test["free_ip"],
                     guest_user,
                     guest_pass,
                     ssh_timeout,
-                    guest_os,
                     iface,
                     test["free_ip"],
                     test["prefix"],
@@ -686,7 +705,6 @@ def main() -> int:
                         guest_user,
                         guest_pass,
                         ssh_timeout,
-                        guest_os,
                         test["gateway"],
                         ping_count,
                     )
@@ -729,7 +747,6 @@ def main() -> int:
     fields = [
         "timestamp_utc",
         "run_id",
-        "guest_os",
         "cluster",
         "host",
         "test_vm",
