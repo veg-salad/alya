@@ -75,7 +75,7 @@ def log_progress(stage: str, current: int, total: int, message: str, width: int 
 
 def prompt_non_empty(text: str) -> str:
     while True:
-        value = input(text).strip()
+        value = input(f"\t{text}").strip()
         if value:
             return value
         print("Value is required.")
@@ -84,7 +84,7 @@ def prompt_non_empty(text: str) -> str:
 def prompt_yes_no(text: str, default: bool) -> bool:
     default_txt = "Y/n" if default else "y/N"
     while True:
-        raw = input(f"{text} [{default_txt}]: ").strip().lower()
+        raw = input(f"\t{text} [{default_txt}]: ").strip().lower()
         if not raw:
             return default
         if raw in {"y", "yes"}:
@@ -92,6 +92,18 @@ def prompt_yes_no(text: str, default: bool) -> bool:
         if raw in {"n", "no"}:
             return False
         print("Please answer yes or no.")
+
+
+def prompt_prefix_length(text: str) -> int:
+    while True:
+        raw = input(f"\t{text}: ").strip()
+        if not raw:
+            print("Prefix length is required.")
+            continue
+        try:
+            return parse_prefix_length(raw, 0)
+        except RuntimeError:
+            print("Please enter a CIDR prefix length from 1 to 32.")
 
 
 def prompt_cluster_selection(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -105,7 +117,7 @@ def prompt_cluster_selection(clusters: List[Dict[str, Any]]) -> List[Dict[str, A
         print(f"  {index}. {name} ({extid})")
 
     while True:
-        raw = input("Select cluster numbers or names separated by comma, or * for all: ").strip()
+        raw = input("\tSelect cluster numbers or names separated by comma, or * for all: ").strip()
         if not raw:
             print("Please select at least one cluster or use * for all.")
             continue
@@ -306,7 +318,7 @@ def run_windows_ps(host: str, username: str, password: str, script: str, timeout
 def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
-        required = {"vlan_id", "subnet_extid", "free_ip", "gateway", "prefix_length"}
+        required = {"vlan_id", "subnet_extid", "free_ip", "gateway"}
         if not reader.fieldnames:
             raise RuntimeError("CSV has no header row")
 
@@ -326,8 +338,6 @@ def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
                 raise RuntimeError(f"CSV line {i}: free_ip is required")
             if not cleaned.get("gateway"):
                 raise RuntimeError(f"CSV line {i}: gateway is required")
-            if not cleaned.get("prefix_length"):
-                raise RuntimeError(f"CSV line {i}: prefix_length is required")
             rows.append(cleaned)
 
         if not rows:
@@ -345,9 +355,36 @@ def parse_prefix_length(value: str, row_num: int) -> int:
     return prefix
 
 
+def subnet_mask_to_prefix_length(value: str, row_num: int) -> int:
+    try:
+        parts = [int(part) for part in value.split(".")]
+    except ValueError:
+        raise RuntimeError(f"CSV row {row_num}: subnet_mask must contain numeric octets")
+    if len(parts) != 4 or any(part < 0 or part > 255 for part in parts):
+        raise RuntimeError(f"CSV row {row_num}: subnet_mask must be a valid IPv4 mask")
+
+    bits = "".join(f"{part:08b}" for part in parts)
+    if "01" in bits:
+        raise RuntimeError(f"CSV row {row_num}: subnet_mask must be contiguous")
+    return bits.count("1")
+
+
+def csv_prefix_length(row: Dict[str, str], row_num: int, default_prefix_length: int) -> int:
+    prefix_length = row.get("prefix_length", "")
+    if prefix_length:
+        return parse_prefix_length(prefix_length, row_num)
+
+    subnet_mask = row.get("subnet_mask", "")
+    if subnet_mask:
+        return subnet_mask_to_prefix_length(subnet_mask, row_num)
+
+    return default_prefix_length
+
+
 def build_subnet_tests(
     csv_rows: List[Dict[str, str]],
     subnets: List[Dict[str, Any]],
+    default_prefix_length: int,
 ) -> List[Dict[str, Any]]:
     by_extid = {s.get("extId"): s for s in subnets if s.get("extId")}
     tests: List[Dict[str, Any]] = []
@@ -375,15 +412,14 @@ def build_subnet_tests(
         ip_cfg_list = subnet.get("ipConfig", [])
         if not ip_cfg_list:
             gateway = row.get("gateway", "")
-            prefix_length = row.get("prefix_length", "")
-            if not gateway or not prefix_length:
+            if not gateway:
                 errors.append(
                     f"Row {idx}: subnet_extid {subnet_extid} has no Prism ipConfig; "
-                    "CSV gateway and prefix_length are required"
+                    "CSV gateway is required"
                 )
                 continue
             try:
-                prefix = parse_prefix_length(prefix_length, idx)
+                prefix = csv_prefix_length(row, idx, default_prefix_length)
             except RuntimeError as exc:
                 errors.append(str(exc))
                 continue
@@ -399,7 +435,7 @@ def build_subnet_tests(
                     continue
                 gateway = csv_gateway
                 try:
-                    prefix = parse_prefix_length(csv_prefix, idx)
+                    prefix = csv_prefix_length(row, idx, default_prefix_length)
                 except RuntimeError as exc:
                     errors.append(str(exc))
                     continue
@@ -528,12 +564,13 @@ def main() -> int:
     log_stage("START", "AHV VLAN Validator (Interactive)")
     pc_host = prompt_non_empty("Prism Central IP/FQDN: ")
     pc_user = prompt_non_empty("Prism Username: ")
-    pc_pass = getpass.getpass("Prism Password: ")
+    pc_pass = getpass.getpass("\tPrism Password: ")
     vm_name = prompt_non_empty("Windows Test VM Name (same name across clusters): ")
     guest_user = prompt_non_empty("Windows Guest Username: ")
-    guest_pass = getpass.getpass("Windows Guest Password: ")
-    csv_path = prompt_non_empty("Path to subnet CSV (vlan_id,subnet_extid,free_ip,gateway,prefix_length): ")
-    report_path = input("Report CSV path [vlan_test_report.csv]: ").strip() or "vlan_test_report.csv"
+    guest_pass = getpass.getpass("\tWindows Guest Password: ")
+    csv_path = prompt_non_empty("Path to subnet CSV (vlan_id,subnet_extid,free_ip,gateway): ")
+    report_path = input("\tReport CSV path [vlan_test_report.csv]: ").strip() or "vlan_test_report.csv"
+    default_prefix_length = prompt_prefix_length("Default CIDR prefix length")
     verify_tls = prompt_yes_no("Verify TLS certificates", default=False)
 
     settle_seconds = DEFAULT_SETTLE_SECONDS
@@ -558,7 +595,7 @@ def main() -> int:
     log_stage("VALIDATION", f"Reading subnet CSV: {csv_path}")
     csv_rows = parse_subnet_csv(csv_path)
     log_stage("VALIDATION", f"Loaded {len(csv_rows)} CSV subnet rows")
-    subnet_tests = build_subnet_tests(csv_rows, subnets)
+    subnet_tests = build_subnet_tests(csv_rows, subnets, default_prefix_length)
     log_stage("VALIDATION", f"Validated {len(subnet_tests)} subnet rows against Prism inventory")
 
     selected_clusters = prompt_cluster_selection(clusters)
@@ -580,6 +617,7 @@ def main() -> int:
         report_rows.append(row)
 
     log_stage("PLAN", f"Run ID: {run_id}")
+    log_stage("PLAN", f"Default prefix length for rows without mask override: /{default_prefix_length}")
     log_stage("PLAN", f"Planned clusters: {len(selected_clusters)} of {len(clusters)} discovered")
     log_stage("PLAN", f"Planned subnet rows: {len(subnet_tests)}")
     for test in subnet_tests:
@@ -614,7 +652,7 @@ def main() -> int:
         log_stage("REPORT", f"Wrote report skeleton: {out}")
         return 0
 
-    if not args.dry_run and input("Type YES to execute this plan: ").strip() != "YES":
+    if not args.dry_run and input("\tType YES to execute this plan: ").strip() != "YES":
         log_stage("CANCELLED", "Execution cancelled by user.")
         return 0
 
@@ -695,7 +733,7 @@ def main() -> int:
                 f"  Test NIC extId: {nic_extid}\n"
                 "  Guest OS: Windows"
             )
-            if input("Type YES to continue this cluster: ").strip() != "YES":
+            if input("\tType YES to continue this cluster: ").strip() != "YES":
                 record(
                     {
                         "cluster": cluster_name,

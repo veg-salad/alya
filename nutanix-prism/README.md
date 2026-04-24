@@ -50,26 +50,28 @@ Required columns:
 - `subnet_extid`
 - `free_ip`
 - `gateway`
-- `prefix_length`
 
 Optional column:
 
 - `subnet_name`
+- `prefix_length`
+- `subnet_mask`
 
 CSV example:
 
 ```csv
-vlan_id,subnet_extid,free_ip,gateway,prefix_length,subnet_name
-100,11111111-2222-3333-4444-555555555555,192.168.100.50,192.168.100.1,24,APP_VLAN_100
-200,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,192.168.200.50,192.168.200.1,24,DB_VLAN_200
+vlan_id,subnet_extid,free_ip,gateway,subnet_name
+100,11111111-2222-3333-4444-555555555555,192.168.100.50,192.168.100.1,APP_VLAN_100
+200,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,192.168.200.50,192.168.200.1,DB_VLAN_200
 ```
 
 Notes:
 
 - `subnet_name` is optional and only for operator readability.
 - `gateway` is the default gateway that the Windows guest pings after its NIC is moved to the target subnet.
-- `prefix_length` is the CIDR mask length, for example `24` for `255.255.255.0`.
-- In non-IPAM environments, Prism may return only Layer 2 network information. In that case, `gateway` and `prefix_length` must be supplied in the CSV.
+- The tool prompts once for a required default CIDR prefix length and uses it for every CSV row without a mask override.
+- To override the default mask per row, provide either `prefix_length` such as `24`, or `subnet_mask` such as `255.255.255.0`.
+- In non-IPAM environments, Prism may return only Layer 2 network information. In that case, `gateway` must be supplied in the CSV, and the prompted default prefix is used unless overridden.
 - `free_ip` must be an unused address in the target subnet. The tool does not reserve or allocate IPs.
 
 ## Prism Inventory vs CSV Input
@@ -85,9 +87,9 @@ The CSV must provide these operator-owned values:
 
 - `free_ip`
 - `gateway`
-- `prefix_length`
+- optional per-row mask override with `prefix_length` or `subnet_mask`
 
-For environments where Prism does not manage IPAM for AHV VLANs, the CSV values are the source of truth for guest IP configuration and gateway probe behavior.
+For environments where Prism does not manage IPAM for AHV VLANs, the CSV values plus the prompted default prefix are the source of truth for guest IP configuration and gateway probe behavior.
 
 ## Execution
 
@@ -127,6 +129,7 @@ Interactive prompts:
 - Windows guest username/password
 - CSV path
 - Report path
+- Default CIDR prefix length for CSV rows without a mask override
 
 Runtime timings and probe settings use built-in defaults in this version:
 
@@ -151,7 +154,8 @@ Before running tests, the tool validates each CSV row against Prism subnet inven
 
 - `subnet_extid` must exist
 - `vlan_id` must match subnet `networkId`
-- each subnet row must have gateway + prefix info, either from Prism IP configuration or from CSV columns
+- each subnet row must have gateway info, either from Prism IP configuration or from the CSV `gateway` column
+- mask information comes from Prism when available, otherwise from CSV `prefix_length` / `subnet_mask`, otherwise the prompted default prefix
 
 During execution, the tool also validates cluster scope:
 
