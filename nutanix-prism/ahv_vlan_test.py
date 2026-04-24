@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Interactive AHV VLAN validation tool (procedural version).
+"""Interactive Prism Element AHV VLAN validation tool.
 
 Workflow:
-1. Prompt for Prism Central and Windows guest credentials.
-2. Validate CSV rows against Prism subnet inventory.
-3. Print all discovered clusters and ask which clusters to test.
-4. Find exactly one VM (by name) per selected cluster.
-5. Enforce exactly one VM NIC (multi-NIC test VMs are blocked).
-6. Rebind VM NIC to each target subnet, configure guest IP, migrate host-by-host.
+1. Prompt for shared credentials and CSV/report settings.
+2. Prompt for one Prism Element endpoint at a time.
+3. Fetch local cluster, hosts, networks, and VMs from Prism Element.
+4. Validate CSV rows against the local Element network inventory.
+5. Find exactly one local Windows test VM and enforce exactly one NIC.
+6. Rebind VM NIC to each target network, configure guest IP, migrate host-by-host.
 7. Run two probes per host: guest-to-gateway and runner-to-guest.
-8. Write CSV PASS/FAIL report.
+8. Keep each Element run in memory and write one combined CSV report at the end.
 """
 
 from __future__ import annotations
@@ -37,13 +37,15 @@ except Exception:
     winrm = None
 
 API_PATHS = {
-    "clusters": "/api/clustermgmt/v4.0/config/clusters",
-    "hosts": "/api/clustermgmt/v4.0/config/hosts",
-    "subnets": "/api/networking/v4.0/config/subnets",
-    "vms": "/api/vmm/v4.0/ahv/config/vms",
-    "vm_get": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}",
-    "vm_nic_update": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}/nics/{nic_extid}",
-    "vm_migrate_action": "/api/vmm/v4.0/ahv/config/vms/{vm_extid}/$actions/migrate-to-host",
+    "cluster": "/cluster/",
+    "hosts": "/hosts/",
+    "networks": "/networks/",
+    "vms": "/vms/",
+    "vm_get": "/vms/{vm_uuid}/",
+    "vm_nics": "/vms/{vm_uuid}/nics/",
+    "vm_nic_update": "/vms/{vm_uuid}/nics/{nic_uuid}",
+    "vm_migrate": "/vms/{vm_uuid}/migrate",
+    "task_get": "/tasks/{task_uuid}",
 }
 
 DEFAULT_SETTLE_SECONDS = 15
@@ -106,71 +108,14 @@ def prompt_prefix_length(text: str) -> int:
             print("Please enter a CIDR prefix length from 1 to 32.")
 
 
-def prompt_cluster_selection(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not clusters:
-        raise RuntimeError("No clusters were discovered in Prism Central")
-
-    print("Discovered clusters:")
-    for index, cluster in enumerate(clusters, start=1):
-        name = cluster.get("name", "")
-        extid = cluster.get("extId", "")
-        print(f"  {index}. {name} ({extid})")
-
-    while True:
-        raw = input("\tSelect cluster numbers or names separated by comma, or * for all: ").strip()
-        if not raw:
-            print("Please select at least one cluster or use * for all.")
-            continue
-        if raw.lower() in {"*", "all"}:
-            return clusters
-
-        selected: List[Dict[str, Any]] = []
-        seen: set[str] = set()
-        errors: List[str] = []
-
-        for token in [part.strip() for part in raw.split(",") if part.strip()]:
-            cluster: Optional[Dict[str, Any]] = None
-            if token.isdigit():
-                index = int(token)
-                if 1 <= index <= len(clusters):
-                    cluster = clusters[index - 1]
-                else:
-                    errors.append(token)
-                    continue
-            else:
-                matches = [c for c in clusters if c.get("name", "").lower() == token.lower()]
-                if len(matches) == 1:
-                    cluster = matches[0]
-                elif len(matches) > 1:
-                    errors.append(f"{token} (ambiguous)")
-                    continue
-                else:
-                    errors.append(token)
-                    continue
-
-            key = cluster.get("extId") or cluster.get("name")
-            if key and key not in seen:
-                selected.append(cluster)
-                seen.add(key)
-
-        if not selected or errors:
-            if errors:
-                print("Invalid cluster selection: " + ", ".join(errors))
-            else:
-                print("Please select at least one cluster.")
-            continue
-
-        return selected
-
-
-def init_session(pc_host: str, pc_user: str, pc_pass: str, verify_tls: bool) -> requests.Session:
+def init_session(element_host: str, element_user: str, element_pass: str, verify_tls: bool) -> requests.Session:
     session = requests.Session()
-    session.auth = (pc_user, pc_pass)
+    session.auth = (element_user, element_pass)
     session.verify = verify_tls
     if not verify_tls:
         requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
     session.headers.update({"Content-Type": "application/json"})
-    session.base_url = f"https://{pc_host}:9440"  # type: ignore[attr-defined]
+    session.base_url = f"https://{element_host}:9440/PrismGateway/services/rest/v2.0"  # type: ignore[attr-defined]
     return session
 
 
@@ -194,62 +139,92 @@ def api_put(session: requests.Session, path: str, timeout: int, payload: Dict[st
     return res.json() if res.text.strip() else {}
 
 
-def list_all(
+def list_entities(
     session: requests.Session,
     path: str,
     timeout: int,
     limit: int = 100,
     label: Optional[str] = None,
+    extra_params: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    page = 0
+    offset = 0
     while True:
-        payload = api_get(session, path, timeout, params={"$page": page, "$limit": limit})
-        batch = payload.get("data", [])
+        params = {"count": limit, "offset": offset}
+        if extra_params:
+            params.update(extra_params)
+        payload = api_get(session, path, timeout, params=params)
+        batch = payload.get("entities", [])
         if not isinstance(batch, list):
             break
         rows.extend(batch)
         meta = payload.get("metadata", {})
-        total = int(meta.get("totalAvailableResults", len(rows)))
+        total = int(meta.get("total_entities", meta.get("totalEntities", len(rows))))
         if label:
-            log_progress("FETCH", len(rows), total, f"{label} page={page}")
+            log_progress("FETCH", len(rows), total, f"{label} offset={offset}")
         if len(rows) >= total or len(batch) < limit:
             break
-        page += 1
+        offset += limit
     return rows
 
 
-def get_vm(session: requests.Session, vm_extid: str, timeout: int) -> Dict[str, Any]:
-    path = API_PATHS["vm_get"].format(vm_extid=vm_extid)
-    return api_get(session, path, timeout).get("data", {})
+def task_uuid(payload: Dict[str, Any]) -> str:
+    return payload.get("task_uuid") or payload.get("uuid") or ""
+
+
+def wait_task(session: requests.Session, task_id: str, timeout: int) -> None:
+    if not task_id:
+        return
+    start = time.time()
+    path = API_PATHS["task_get"].format(task_uuid=task_id)
+    while time.time() - start < timeout:
+        task = api_get(session, path, DEFAULT_API_TIMEOUT)
+        status = str(task.get("progress_status") or task.get("status") or "").lower()
+        if status in {"succeeded", "success", "completed"}:
+            return
+        if status in {"failed", "failure", "aborted"}:
+            raise RuntimeError(task.get("message") or f"Task {task_id} failed with status {status}")
+        time.sleep(5)
+    raise RuntimeError(f"Timed out waiting for task {task_id}")
+
+
+def get_vm(session: requests.Session, vm_uuid: str, timeout: int) -> Dict[str, Any]:
+    path = API_PATHS["vm_get"].format(vm_uuid=vm_uuid)
+    return api_get(session, path, timeout, params={"include_vm_nic_config": "true"})
+
+
+def get_vm_nics(session: requests.Session, vm_uuid: str, timeout: int) -> List[Dict[str, Any]]:
+    vm = get_vm(session, vm_uuid, timeout)
+    nics = vm.get("vm_nics")
+    if isinstance(nics, list):
+        return nics
+    path = API_PATHS["vm_nics"].format(vm_uuid=vm_uuid)
+    payload = api_get(session, path, timeout)
+    return payload.get("entities", []) if isinstance(payload.get("entities"), list) else []
 
 
 def rebind_vm_nic_subnet(
     session: requests.Session,
-    vm_extid: str,
-    nic_extid: str,
-    subnet_extid: str,
+    vm_uuid: str,
+    nic_uuid: str,
+    network_uuid: str,
     timeout: int,
 ) -> None:
-    vm = get_vm(session, vm_extid, timeout)
-    nic = next((n for n in vm.get("nics", []) if n.get("extId") == nic_extid), None)
+    nic = next((n for n in get_vm_nics(session, vm_uuid, timeout) if n.get("nic_uuid") == nic_uuid), None)
     if not nic:
-        raise RuntimeError(f"NIC {nic_extid} not found on VM {vm_extid}")
+        raise RuntimeError(f"NIC {nic_uuid} not found on VM {vm_uuid}")
 
     payload = json.loads(json.dumps(nic))
-    for key in ["nicNetworkInfo", "networkInfo"]:
-        payload.setdefault(key, {})
-        payload[key]["nicType"] = "NORMAL_NIC"
-        payload[key]["vlanMode"] = "ACCESS"
-        payload[key]["subnet"] = {"extId": subnet_extid}
+    payload["network_uuid"] = network_uuid
+    payload["is_connected"] = True
 
-    path = API_PATHS["vm_nic_update"].format(vm_extid=vm_extid, nic_extid=nic_extid)
-    api_put(session, path, timeout, payload)
+    path = API_PATHS["vm_nic_update"].format(vm_uuid=vm_uuid, nic_uuid=nic_uuid)
+    wait_task(session, task_uuid(api_put(session, path, timeout, payload)), timeout)
 
 
-def migrate_vm_to_host(session: requests.Session, vm_extid: str, host_extid: str, timeout: int) -> None:
-    path = API_PATHS["vm_migrate_action"].format(vm_extid=vm_extid)
-    api_post(session, path, timeout, {"host": {"extId": host_extid}})
+def migrate_vm_to_host(session: requests.Session, vm_uuid: str, host_uuid: str, timeout: int) -> None:
+    path = API_PATHS["vm_migrate"].format(vm_uuid=vm_uuid)
+    wait_task(session, task_uuid(api_post(session, path, DEFAULT_API_TIMEOUT, {"host_uuid": host_uuid})), timeout)
 
 
 def ssh_run(host: str, username: str, password: str, command: str, timeout: int) -> Dict[str, Any]:
@@ -381,82 +356,50 @@ def csv_prefix_length(row: Dict[str, str], row_num: int, default_prefix_length: 
     return default_prefix_length
 
 
-def build_subnet_tests(
+def build_network_tests(
     csv_rows: List[Dict[str, str]],
-    subnets: List[Dict[str, Any]],
+    networks: List[Dict[str, Any]],
     default_prefix_length: int,
 ) -> List[Dict[str, Any]]:
-    by_extid = {s.get("extId"): s for s in subnets if s.get("extId")}
+    by_uuid = {n.get("uuid"): n for n in networks if n.get("uuid")}
     tests: List[Dict[str, Any]] = []
     errors: List[str] = []
 
     for idx, row in enumerate(csv_rows, start=1):
-        subnet_extid = row["subnet_extid"]
+        network_uuid = row["subnet_extid"]
         expected_vlan = str(row["vlan_id"])
         free_ip = row["free_ip"]
 
-        subnet = by_extid.get(subnet_extid)
-        if not subnet:
-            errors.append(f"Row {idx}: subnet_extid {subnet_extid} not found in Prism inventory")
+        network = by_uuid.get(network_uuid)
+        if not network:
+            errors.append(f"Row {idx}: subnet_extid {network_uuid} not found in Prism Element network inventory")
             continue
 
-        actual_vlan = str(subnet.get("networkId", ""))
+        actual_vlan = str(network.get("vlan_id", ""))
         if expected_vlan != actual_vlan:
             errors.append(
-                f"Row {idx}: subnet_extid {subnet_extid} VLAN mismatch. CSV={expected_vlan}, Prism={actual_vlan}"
+                f"Row {idx}: subnet_extid {network_uuid} VLAN mismatch. CSV={expected_vlan}, Prism Element={actual_vlan}"
             )
             continue
 
-        prefix = 0
-        gateway = ""
-        ip_cfg_list = subnet.get("ipConfig", [])
-        if not ip_cfg_list:
-            gateway = row.get("gateway", "")
-            if not gateway:
-                errors.append(
-                    f"Row {idx}: subnet_extid {subnet_extid} has no Prism ipConfig; "
-                    "CSV gateway is required"
-                )
-                continue
-            try:
-                prefix = csv_prefix_length(row, idx, default_prefix_length)
-            except RuntimeError as exc:
-                errors.append(str(exc))
-                continue
-        else:
-            ipv4 = ip_cfg_list[0].get("ipv4", {})
-            prefix = ipv4.get("ipSubnet", {}).get("prefixLength")
-            gateway = ipv4.get("defaultGatewayIp", {}).get("value")
-            if prefix is None or not gateway:
-                csv_gateway = row.get("gateway", "")
-                csv_prefix = row.get("prefix_length", "")
-                if not csv_gateway or not csv_prefix:
-                    errors.append(f"Row {idx}: subnet_extid {subnet_extid} missing prefix or default gateway")
-                    continue
-                gateway = csv_gateway
-                try:
-                    prefix = csv_prefix_length(row, idx, default_prefix_length)
-                except RuntimeError as exc:
-                    errors.append(str(exc))
-                    continue
-
-        cluster_extids: List[str] = []
-        for extid in subnet.get("clusterReferenceList", []) or []:
-            if extid and extid not in cluster_extids:
-                cluster_extids.append(extid)
-        single_cluster = subnet.get("clusterReference")
-        if single_cluster and single_cluster not in cluster_extids:
-            cluster_extids.append(single_cluster)
+        gateway = row.get("gateway", "")
+        if not gateway:
+            errors.append(f"Row {idx}: gateway is required")
+            continue
+        try:
+            prefix = csv_prefix_length(row, idx, default_prefix_length)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+            continue
 
         tests.append(
             {
                 "vlan_id": int(actual_vlan),
-                "subnet_extid": subnet_extid,
-                "subnet_name": subnet.get("name", ""),
+                "subnet_extid": network_uuid,
+                "subnet_name": network.get("name", ""),
                 "prefix": int(prefix),
                 "gateway": gateway,
                 "free_ip": free_ip,
-                "cluster_extids": cluster_extids,
             }
         )
 
@@ -551,20 +494,19 @@ def ping_guest_from_runner(target_ip: str, ping_count: int) -> Dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Interactive AHV VLAN validator")
+    parser = argparse.ArgumentParser(description="Interactive Prism Element AHV VLAN validator")
     parser.add_argument("--dry-run", action="store_true", help="Only validate/discover, no changes")
     parser.add_argument("--preflight-only", action="store_true", help="Validate and print plan only")
     parser.add_argument(
-        "--confirm-vm-per-cluster",
+        "--confirm-vm-per-element",
         action="store_true",
-        help="Require manual YES confirmation before each cluster",
+        help="Require manual YES confirmation before each Element run",
     )
     args = parser.parse_args()
 
     log_stage("START", "AHV VLAN Validator (Interactive)")
-    pc_host = prompt_non_empty("Prism Central IP/FQDN: ")
-    pc_user = prompt_non_empty("Prism Username: ")
-    pc_pass = getpass.getpass("\tPrism Password: ")
+    element_user = prompt_non_empty("Prism Element Username: ")
+    element_pass = getpass.getpass("\tPrism Element Password: ")
     vm_name = prompt_non_empty("Windows Test VM Name (same name across clusters): ")
     guest_user = prompt_non_empty("Windows Guest Username: ")
     guest_pass = getpass.getpass("\tWindows Guest Password: ")
@@ -580,103 +522,53 @@ def main() -> int:
     migration_timeout = DEFAULT_MIGRATION_TIMEOUT
 
     run_id = str(uuid.uuid4())
-    session = init_session(pc_host, pc_user, pc_pass, verify_tls)
-
-    log_stage("INVENTORY", "Fetching clusters, hosts, subnets, and VMs from Prism Central")
-    clusters = list_all(session, API_PATHS["clusters"], api_timeout, label="clusters")
-    hosts = list_all(session, API_PATHS["hosts"], api_timeout, label="hosts")
-    subnets = list_all(session, API_PATHS["subnets"], api_timeout, label="subnets")
-    vms = list_all(session, API_PATHS["vms"], api_timeout, label="vms")
-    log_stage(
-        "INVENTORY",
-        f"Fetched clusters={len(clusters)} hosts={len(hosts)} subnets={len(subnets)} vms={len(vms)}",
-    )
 
     log_stage("VALIDATION", f"Reading subnet CSV: {csv_path}")
     csv_rows = parse_subnet_csv(csv_path)
     log_stage("VALIDATION", f"Loaded {len(csv_rows)} CSV subnet rows")
-    subnet_tests = build_subnet_tests(csv_rows, subnets, default_prefix_length)
-    log_stage("VALIDATION", f"Validated {len(subnet_tests)} subnet rows against Prism inventory")
-
-    selected_clusters = prompt_cluster_selection(clusters)
-    print("Selected clusters:")
-    for cluster in selected_clusters:
-        print(f"  - {cluster.get('name', '')} ({cluster.get('extId', '')})")
-
-    hosts_by_cluster: Dict[str, List[Dict[str, Any]]] = {}
-    for host in hosts:
-        cluster_id = host.get("cluster", {}).get("uuid")
-        if cluster_id:
-            hosts_by_cluster.setdefault(cluster_id, []).append(host)
 
     report_rows: List[Dict[str, Any]] = []
 
-    def record(row: Dict[str, Any]) -> None:
+    def record(row: Dict[str, Any], element_host: str, cluster: Dict[str, Any]) -> None:
         row["timestamp_utc"] = now_utc()
         row["run_id"] = run_id
+        row["element"] = element_host
+        row["cluster_uuid"] = cluster.get("uuid") or cluster.get("cluster_uuid") or ""
         report_rows.append(row)
 
     log_stage("PLAN", f"Run ID: {run_id}")
     log_stage("PLAN", f"Default prefix length for rows without mask override: /{default_prefix_length}")
-    log_stage("PLAN", f"Planned clusters: {len(selected_clusters)} of {len(clusters)} discovered")
-    log_stage("PLAN", f"Planned subnet rows: {len(subnet_tests)}")
-    for test in subnet_tests:
+    while True:
+        element_host = prompt_non_empty("Prism Element IP/FQDN: ")
+        session = init_session(element_host, element_user, element_pass, verify_tls)
+
+        log_stage("INVENTORY", f"{element_host}: fetching local cluster, hosts, networks, and VMs")
+        cluster = api_get(session, API_PATHS["cluster"], api_timeout)
+        cluster_name = cluster.get("name", element_host)
+        hosts = list_entities(session, API_PATHS["hosts"], api_timeout, label="hosts")
+        networks = list_entities(session, API_PATHS["networks"], api_timeout, label="networks")
+        vms = list_entities(
+            session,
+            API_PATHS["vms"],
+            api_timeout,
+            label="vms",
+            extra_params={"include_vm_nic_config": "true"},
+        )
         log_stage(
-            "PLAN",
-            f"subnet={test['subnet_name']} vlan={test['vlan_id']} "
-            f"extId={test['subnet_extid']} ip={test['free_ip']} gw={test['gateway']}/{test['prefix']}",
+            "INVENTORY",
+            f"{cluster_name}: fetched hosts={len(hosts)} networks={len(networks)} vms={len(vms)}",
         )
 
-    if args.preflight_only:
-        log_stage("PREFLIGHT", "Preflight only selected. No changes will be made.")
-        out = Path(report_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        fields = [
-            "timestamp_utc",
-            "run_id",
-            "cluster",
-            "host",
-            "test_vm",
-            "vlan_id",
-            "subnet",
-            "subnet_extid",
-            "test_ip",
-            "gateway",
-            "status",
-            "stage",
-            "detail",
-        ]
-        with out.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fields)
-            writer.writeheader()
-        log_stage("REPORT", f"Wrote report skeleton: {out}")
-        return 0
+        subnet_tests = build_network_tests(csv_rows, networks, default_prefix_length)
+        log_stage("VALIDATION", f"{cluster_name}: validated {len(subnet_tests)} CSV rows against Element networks")
+        for test in subnet_tests:
+            log_stage(
+                "PLAN",
+                f"{cluster_name}: subnet={test['subnet_name']} vlan={test['vlan_id']} "
+                f"uuid={test['subnet_extid']} ip={test['free_ip']} gw={test['gateway']}/{test['prefix']}",
+            )
 
-    if not args.dry_run and input("\tType YES to execute this plan: ").strip() != "YES":
-        log_stage("CANCELLED", "Execution cancelled by user.")
-        return 0
-
-    for cluster_index, cluster in enumerate(selected_clusters, start=1):
-        cluster_name = cluster.get("name", "")
-        cluster_extid = cluster.get("extId", "")
-        log_progress("CLUSTERS", cluster_index, len(selected_clusters), f"cluster={cluster_name or '<unnamed>'}")
-        if not cluster_extid:
-            log_stage("CLUSTER", f"Skipping cluster with missing extId: {cluster_name}")
-            continue
-
-        cluster_hosts = hosts_by_cluster.get(cluster_extid, [])
-        if not cluster_hosts:
-            log_stage("CLUSTER", f"Skipping {cluster_name}: no hosts discovered")
-            continue
-
-        log_stage("CLUSTER", f"Starting cluster {cluster_name} with {len(cluster_hosts)} hosts")
-
-        vm_matches = [
-            vm
-            for vm in vms
-            if vm.get("name") == vm_name and vm.get("cluster", {}).get("extId") == cluster_extid
-        ]
-
+        vm_matches = [vm for vm in vms if vm.get("name") == vm_name]
         if len(vm_matches) != 1:
             log_stage("VM", f"{cluster_name}: expected one VM named {vm_name}, found {len(vm_matches)}")
             record(
@@ -692,17 +584,20 @@ def main() -> int:
                     "status": "FAIL",
                     "stage": "vm_targeting",
                     "detail": f"Expected 1 VM named {vm_name}, found {len(vm_matches)}",
-                }
+                },
+                element_host,
+                cluster,
             )
+            if not prompt_yes_no("Process another Prism Element", default=False):
+                break
             continue
 
-        vm_extid = vm_matches[0].get("extId", "")
-        log_stage("VM", f"{cluster_name}: matched test VM {vm_name} ({vm_extid})")
-        vm_full = get_vm(session, vm_extid, api_timeout)
-        vm_nics = vm_full.get("nics", [])
+        vm_uuid = vm_matches[0].get("uuid", "")
+        log_stage("VM", f"{cluster_name}: matched test VM {vm_name} ({vm_uuid})")
+        vm_nics = get_vm_nics(session, vm_uuid, api_timeout)
 
-        # Keep behavior deterministic and simple for operators.
         if len(vm_nics) != 1:
+            log_stage("VM", f"Skipping {cluster_name}: VM has {len(vm_nics)} NICs; exactly one is required")
             record(
                 {
                     "cluster": cluster_name,
@@ -716,24 +611,28 @@ def main() -> int:
                     "status": "FAIL",
                     "stage": "vm_nic_count",
                     "detail": f"Test VM must have exactly 1 NIC; found {len(vm_nics)}",
-                }
+                },
+                element_host,
+                cluster,
             )
-            log_stage("VM", f"Skipping {cluster_name}: VM has {len(vm_nics)} NICs; exactly one is required")
+            if not prompt_yes_no("Process another Prism Element", default=False):
+                break
             continue
 
-        nic_extid = vm_nics[0].get("extId", "")
-        log_stage("VM", f"{cluster_name}: using VM NIC {nic_extid}")
+        nic_uuid = vm_nics[0].get("nic_uuid", "")
+        log_stage("VM", f"{cluster_name}: using VM NIC {nic_uuid}")
 
-        if args.confirm_vm_per_cluster:
+        if args.confirm_vm_per_element:
             print(
-                f"[{now_utc()}] Confirm cluster execution:\n"
+                f"[{now_utc()}] Confirm Element execution:\n"
+                f"  Element: {element_host}\n"
                 f"  Cluster: {cluster_name}\n"
                 f"  Test VM: {vm_name}\n"
-                f"  Test VM extId: {vm_extid}\n"
-                f"  Test NIC extId: {nic_extid}\n"
+                f"  Test VM UUID: {vm_uuid}\n"
+                f"  Test NIC UUID: {nic_uuid}\n"
                 "  Guest OS: Windows"
             )
-            if input("\tType YES to continue this cluster: ").strip() != "YES":
+            if input("\tType YES to continue this Element: ").strip() != "YES":
                 record(
                     {
                         "cluster": cluster_name,
@@ -746,12 +645,21 @@ def main() -> int:
                         "gateway": "",
                         "status": "FAIL",
                         "stage": "operator_confirmation",
-                        "detail": "Cluster execution cancelled by user",
-                    }
+                        "detail": "Element execution cancelled by user",
+                    },
+                    element_host,
+                    cluster,
                 )
+                if not prompt_yes_no("Process another Prism Element", default=False):
+                    break
                 continue
 
-        log_stage("CLUSTER", f"{cluster_name}: processing {len(subnet_tests)} subnet rows")
+        if not args.dry_run and not args.preflight_only:
+            if input(f"\tType YES to execute this Element plan for {cluster_name}: ").strip() != "YES":
+                log_stage("CANCELLED", f"{cluster_name}: execution cancelled by user")
+                if not prompt_yes_no("Process another Prism Element", default=False):
+                    break
+                continue
 
         for subnet_index, test in enumerate(subnet_tests, start=1):
             log_progress(
@@ -760,31 +668,9 @@ def main() -> int:
                 len(subnet_tests),
                 f"cluster={cluster_name} vlan={test['vlan_id']} subnet={test['subnet_name']}",
             )
-            log_stage(
-                "SUBNET",
-                f"{cluster_name}: vlan={test['vlan_id']} subnet={test['subnet_name']} extId={test['subnet_extid']}",
-            )
-            if test["cluster_extids"] and cluster_extid not in test["cluster_extids"]:
-                log_stage("SUBNET", f"{cluster_name}: subnet is outside cluster scope; recording failure")
-                record(
-                    {
-                        "cluster": cluster_name,
-                        "host": "",
-                        "test_vm": vm_name,
-                        "vlan_id": test["vlan_id"],
-                        "subnet": test["subnet_name"],
-                        "subnet_extid": test["subnet_extid"],
-                        "test_ip": test["free_ip"],
-                        "gateway": test["gateway"],
-                        "status": "FAIL",
-                        "stage": "subnet_cluster_scope",
-                        "detail": "Subnet is not associated with this cluster in Prism references",
-                    }
-                )
-                continue
 
-            if args.dry_run:
-                log_stage("DRY_RUN", f"{cluster_name}: planned only; no VM, NIC, guest, or migration actions executed")
+            if args.dry_run or args.preflight_only:
+                status = "PREFLIGHT" if args.preflight_only else "DRY_RUN"
                 record(
                     {
                         "cluster": cluster_name,
@@ -795,16 +681,18 @@ def main() -> int:
                         "subnet_extid": test["subnet_extid"],
                         "test_ip": test["free_ip"],
                         "gateway": test["gateway"],
-                        "status": "DRY_RUN",
+                        "status": status,
                         "stage": "planned",
                         "detail": "No actions executed",
-                    }
+                    },
+                    element_host,
+                    cluster,
                 )
                 continue
 
             try:
-                log_stage("NIC", f"{cluster_name}: rebinding test VM NIC to subnet {test['subnet_extid']}")
-                rebind_vm_nic_subnet(session, vm_extid, nic_extid, test["subnet_extid"], api_timeout)
+                log_stage("NIC", f"{cluster_name}: rebinding test VM NIC to network {test['subnet_extid']}")
+                rebind_vm_nic_subnet(session, vm_uuid, nic_uuid, test["subnet_extid"], api_timeout)
                 time.sleep(settle_seconds)
 
                 log_stage("GUEST", f"{cluster_name}: detecting Windows guest interface using {test['free_ip']}")
@@ -837,40 +725,21 @@ def main() -> int:
                         "status": "FAIL",
                         "stage": "guest_prep",
                         "detail": str(exc),
-                    }
+                    },
+                    element_host,
+                    cluster,
                 )
                 continue
 
-            for host_index, host in enumerate(cluster_hosts, start=1):
-                host_name = host.get("hostName", "")
-                host_extid = host.get("extId", "")
-                log_progress(
-                    "HOSTS",
-                    host_index,
-                    len(cluster_hosts),
-                    f"cluster={cluster_name} host={host_name or host_extid}",
-                )
-                log_stage("HOST", f"{cluster_name}: testing host {host_name} ({host_extid})")
-
+            for host_index, host in enumerate(hosts, start=1):
+                host_name = host.get("name", "")
+                host_uuid = host.get("uuid", "")
+                log_progress("HOSTS", host_index, len(hosts), f"cluster={cluster_name} host={host_name or host_uuid}")
                 try:
                     log_stage("MIGRATE", f"{cluster_name}: migrating test VM to host {host_name}")
-                    migrate_vm_to_host(session, vm_extid, host_extid, api_timeout)
-
-                    start = time.time()
-                    placed = False
-                    while time.time() - start < migration_timeout:
-                        vm_state = get_vm(session, vm_extid, api_timeout)
-                        cur_host = vm_state.get("host", {}).get("extId")
-                        if cur_host == host_extid:
-                            placed = True
-                            break
-                        time.sleep(5)
-
-                    if not placed:
-                        raise RuntimeError("Timed out waiting for host placement")
-
-                    log_stage("MIGRATE", f"{cluster_name}: VM placement confirmed on {host_name}")
+                    migrate_vm_to_host(session, vm_uuid, host_uuid, migration_timeout)
                     time.sleep(settle_seconds)
+
                     log_stage("PROBE", f"{cluster_name}: pinging gateway {test['gateway']} from guest")
                     ping_res = ping_gateway(
                         test["free_ip"],
@@ -880,25 +749,23 @@ def main() -> int:
                         test["gateway"],
                         ping_count,
                     )
-
                     log_stage("PROBE", f"{cluster_name}: pinging guest test IP {test['free_ip']} from runner")
                     runner_ping = ping_guest_from_runner(test["free_ip"], ping_count)
 
                     guest_ok = ping_res["exit_code"] == 0
                     runner_ok = runner_ping["exit_code"] == 0
                     ok = guest_ok and runner_ok
-                    log_stage(
-                        "RESULT",
-                        f"{cluster_name}/{host_name}: {'PASS' if ok else 'FAIL'} "
-                        f"guest_gateway={'PASS' if guest_ok else 'FAIL'} runner_to_guest={'PASS' if runner_ok else 'FAIL'}",
-                    )
-
                     guest_detail = (ping_res["stderr"] or ping_res["stdout"]).strip()
                     runner_detail = (runner_ping["stderr"] or runner_ping["stdout"]).strip()
                     detail = (
                         f"guest_gateway_ping={'PASS' if guest_ok else 'FAIL'}; "
                         f"runner_to_guest_ping={'PASS' if runner_ok else 'FAIL'}; "
                         f"guest_output={guest_detail}; runner_output={runner_detail}"
+                    )
+                    log_stage(
+                        "RESULT",
+                        f"{cluster_name}/{host_name}: {'PASS' if ok else 'FAIL'} "
+                        f"guest_gateway={'PASS' if guest_ok else 'FAIL'} runner_to_guest={'PASS' if runner_ok else 'FAIL'}",
                     )
                     record(
                         {
@@ -913,7 +780,9 @@ def main() -> int:
                             "status": "PASS" if ok else "FAIL",
                             "stage": "icmp_probe",
                             "detail": detail,
-                        }
+                        },
+                        element_host,
+                        cluster,
                     )
                 except Exception as exc:
                     log_stage("ERROR", f"{cluster_name}/{host_name}: runtime failure: {exc}")
@@ -930,14 +799,21 @@ def main() -> int:
                             "status": "FAIL",
                             "stage": "runtime",
                             "detail": str(exc),
-                        }
+                        },
+                        element_host,
+                        cluster,
                     )
+
+        if not prompt_yes_no("Process another Prism Element", default=False):
+            break
 
     out = Path(report_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "timestamp_utc",
         "run_id",
+        "element",
+        "cluster_uuid",
         "cluster",
         "host",
         "test_vm",

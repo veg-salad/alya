@@ -2,29 +2,29 @@
 
 ## Overview
 
-- Prompts interactively for Prism Central and guest credentials.
-- Reads a CSV containing VLAN/subnet/test-IP rows and L3 details when Prism does not provide IPAM data.
-- Fetches AHV subnet inventory from Prism Central and validates CSV rows before execution.
-- Prints discovered clusters and asks which clusters to test.
-- Finds one pre-created Windows test VM (same name) in each selected cluster.
+- Prompts interactively for Prism Element, guest, CSV, and report settings.
+- Reads a CSV containing VLAN/network/test-IP rows and L3 details when Prism does not provide IPAM data.
+- Fetches AHV network inventory from each Prism Element and validates CSV rows before execution.
+- Processes one Prism Element cluster at a time, then asks whether to process another Element.
+- Finds one pre-created Windows test VM in each Element cluster.
 - Enforces exactly one NIC on the test VM (multi-NIC test VMs are not allowed).
-- Rebinds test VM NIC to each target subnet, auto-detects guest interface name using guest credentials, migrates across hosts, pings gateway from inside guest, and pings the test guest IP from the machine running the script.
+- Rebinds test VM NIC to each target AHV network, auto-detects guest interface name using guest credentials, migrates across hosts, pings gateway from inside guest, and pings the test guest IP from the machine running the script.
 - For Windows guests, command execution tries SSH first and automatically falls back to PowerShell WinRM.
-- Produces CSV report with PASS/FAIL rows.
+- Keeps each Element run in memory and produces one combined CSV report with PASS/FAIL rows.
 
 ## Prerequisites
 
 - Python 3.9+ on the execution machine.
 - Network connectivity from execution machine to:
-	- Prism Central (`https://<pc>:9440`)
+	- Prism Element (`https://<element>:9440`)
 	- Windows guest test VM IPs over SSH (`tcp/22`) and/or WinRM (`tcp/5985`; `tcp/5986` if HTTPS WinRM is used)
 	- ICMP reachability from execution machine to test guest IPs
-- Prism Central API credentials with rights for inventory read, VM NIC update, and VM migration.
-- One pre-created Windows test VM in each selected cluster with the same VM name.
+- Prism Element API credentials with rights for inventory read, VM NIC update, and VM migration.
+- One pre-created Windows test VM in each Element cluster you process.
 - Test VM must have exactly one NIC.
 - Guest remote access requirements:
  	- Windows test VM: OpenSSH Server recommended; WinRM enabled as fallback; account with administrator rights for `Get-NetRoute`, `New-NetIPAddress`, and `Test-Connection`.
-- Reserved free IP per tested subnet/VLAN.
+- Reserved free IP per tested network/VLAN.
 
 ## Installation
 
@@ -68,19 +68,19 @@ vlan_id,subnet_extid,free_ip,gateway,subnet_name
 Notes:
 
 - `subnet_name` is optional and only for operator readability.
-- `gateway` is the default gateway that the Windows guest pings after its NIC is moved to the target subnet.
+- `gateway` is the default gateway that the Windows guest pings after its NIC is moved to the target network.
 - The tool prompts once for a required default CIDR prefix length and uses it for every CSV row without a mask override.
 - To override the default mask per row, provide either `prefix_length` such as `24`, or `subnet_mask` such as `255.255.255.0`.
 - In non-IPAM environments, Prism may return only Layer 2 network information. In that case, `gateway` must be supplied in the CSV, and the prompted default prefix is used unless overridden.
-- `free_ip` must be an unused address in the target subnet. The tool does not reserve or allocate IPs.
+- `free_ip` must be an unused address in the target network. The tool does not reserve or allocate IPs.
 
 ## Prism Inventory vs CSV Input
 
-The tool fetches these details from Prism Central:
+The tool fetches these details from each Prism Element:
 
-- clusters and hosts
+- local cluster and hosts
 - VM inventory and test VM NIC details
-- AHV subnet extId, VLAN ID, subnet name, cluster references, bridge, and virtual switch references
+- AHV network UUID, VLAN ID, network name, bridge, and virtual switch references
 - Prism IP configuration when available
 
 The CSV must provide these operator-owned values:
@@ -105,16 +105,16 @@ Preflight only (no mutation, plan printout only):
 python ahv_vlan_test.py --preflight-only
 ```
 
-Manual per-cluster VM confirmation gate:
+Manual per-Element VM confirmation gate:
 
 ```bash
-python ahv_vlan_test.py --confirm-vm-per-cluster
+python ahv_vlan_test.py --confirm-vm-per-element
 ```
 
 Execution mode behavior:
 
 - `--preflight-only` exits after plan/validation (takes precedence over `--dry-run`).
-- `--confirm-vm-per-cluster` applies to actual run and `--dry-run`, not `--preflight-only`.
+- `--confirm-vm-per-element` applies to actual run and `--dry-run`, not `--preflight-only`.
 
 Actual run:
 
@@ -124,12 +124,14 @@ python ahv_vlan_test.py
 
 Interactive prompts:
 
-- Prism Central IP/FQDN, username, password
+- Prism Element username/password
 - Windows Test VM name
 - Windows guest username/password
 - CSV path
 - Report path
 - Default CIDR prefix length for CSV rows without a mask override
+- One Prism Element IP/FQDN at a time
+- Whether to process another Prism Element after each cluster completes
 
 Runtime timings and probe settings use built-in defaults in this version:
 
@@ -141,7 +143,7 @@ Runtime timings and probe settings use built-in defaults in this version:
 
 The script auto-detects guest interface name from the default route inside the guest.
 
-After inventory discovery, the script prints all cluster names and prompts for selection. Enter cluster numbers or names separated by commas, or `*` for all discovered clusters.
+After each Element inventory discovery, the script prints the local cluster plan, executes or records that cluster, then asks whether to process another Prism Element. All results are written to one combined report.
 
 For Windows guests, remote execution order is:
 
@@ -150,17 +152,12 @@ For Windows guests, remote execution order is:
 
 ## Validation and Safety Controls
 
-Before running tests, the tool validates each CSV row against Prism subnet inventory:
+Before running tests, the tool validates each CSV row against the current Prism Element network inventory:
 
-- `subnet_extid` must exist
-- `vlan_id` must match subnet `networkId`
-- each subnet row must have gateway info, either from Prism IP configuration or from the CSV `gateway` column
+- `subnet_extid` must exist as an Element network UUID
+- `vlan_id` must match the Element network `vlan_id`
+- each CSV row must have gateway info, either from Prism IP configuration or from the CSV `gateway` column
 - mask information comes from Prism when available, otherwise from CSV `prefix_length` / `subnet_mask`, otherwise the prompted default prefix
-
-During execution, the tool also validates cluster scope:
-
-- subnet cluster references (`clusterReferenceList` / `clusterReference`) must include the cluster under test
-- if not, that row is marked `FAIL` with stage `subnet_cluster_scope` and skipped
 
 VM targeting controls:
 
@@ -170,8 +167,8 @@ VM targeting controls:
 
 Execution confirmation controls:
 
-- non-dry-run execution requires a global `YES` confirmation after preflight summary
-- optional `--confirm-vm-per-cluster` requires `YES` per cluster and prints VM extId/NIC extId
+- non-dry-run execution requires a `YES` confirmation for each Element plan
+- optional `--confirm-vm-per-element` requires `YES` per Element and prints VM UUID/NIC UUID
 
 If any row fails validation, execution stops immediately.
 
@@ -184,7 +181,6 @@ Probe behavior per migrated host:
 ## Operational Notes and Limitations
 
 - `--preflight-only` takes precedence if combined with `--dry-run`.
-- `--confirm-vm-per-cluster` applies to actual run and dry-run, not preflight-only.
-- A subnet row is skipped for a cluster if subnet cluster references do not include that cluster.
+- `--confirm-vm-per-element` applies to actual run and dry-run, not preflight-only.
 - SSH host keys are auto-accepted in this version; run only in trusted network contexts.
 - Windows WinRM fallback currently uses default HTTP WinRM (`tcp/5985`) unless code is extended for custom HTTPS endpoint handling.

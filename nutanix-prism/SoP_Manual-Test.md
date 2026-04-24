@@ -1,4 +1,4 @@
-# SOP / KB: Manual AHV VLAN Validation via Prism Central (1-2 Hosts)
+# SOP / KB: Manual AHV VLAN Validation via Prism Element (1-2 Hosts)
 
 ## Purpose
 
@@ -6,8 +6,8 @@ Use this SOP to manually validate VLAN/subnet connectivity in Nutanix AHV for a 
 
 This follows the same logic as the script:
 
-1. Review the available clusters and choose the target cluster or clusters.
-2. Validate VLAN-to-subnet mapping.
+1. Open the target Prism Element cluster.
+2. Validate VLAN-to-AHV-network mapping.
 3. Attach the test VM NIC to one subnet.
 4. Set the test IP inside the Windows guest.
 5. Ping the default gateway from inside the guest.
@@ -16,7 +16,7 @@ This follows the same logic as the script:
 
 ## Scope
 
-- Platform: Nutanix AHV managed by Prism Central.
+- Platform: Nutanix AHV managed by Prism Element.
 - Use case: Manual spot-check for one or two hosts.
 - Goal: Verify per-host VLAN path health for selected subnets.
 
@@ -28,11 +28,11 @@ Not in scope:
 ## Audience
 
 - Junior to mid-level sysadmins.
-- Basic familiarity with Prism Central navigation and Windows guest login.
+- Basic familiarity with Prism Element navigation and Windows guest login.
 
 ## Prerequisites
 
-- Access to Prism Central UI with permissions for:
+- Access to Prism Element UI with permissions for:
   - VM view/edit
   - VM live migration
   - Network/subnet view
@@ -40,11 +40,11 @@ Not in scope:
    - SSH or WinRM access available
 - Windows guest credentials with administrative privileges to change IP and route.
 - Reserved free IPs for each subnet you test (from IPAM).
-- A small test plan table (subnet name, VLAN ID, subnet extId, free IP, gateway).
+- A small test plan table (network name, VLAN ID, network UUID, free IP, gateway).
 
 ## Dependencies / Tools
 
-- Web browser for Prism Central.
+- Web browser for Prism Element.
 - SSH client (PuTTY/PowerShell/OpenSSH) or PowerShell Remoting/WinRM access.
 - Notepad/Excel sheet to record results.
 
@@ -52,9 +52,9 @@ Not in scope:
 
 For each subnet/VLAN under test:
 
-- Subnet name in Prism Central
-- VLAN ID (networkId)
-- Subnet extId
+- Network name in Prism Element
+- VLAN ID
+- Network UUID
 - Free test IP
 - Prefix/mask
 - Default gateway
@@ -72,33 +72,32 @@ For host checks:
 3. Confirm free test IPs are reserved and not in use.
 4. Confirm you can log in to guest VM before making changes.
 
-## Cluster Selection
+## Element Selection
 
-Before testing, review the cluster list in Prism Central and choose the exact cluster or clusters you want to verify.
+Before testing, choose the exact Prism Element cluster you want to verify. For multi-cluster testing, repeat the procedure one Element at a time and combine the results.
 
 Guidance:
 
-- If testing everything, note all discovered clusters.
-- If testing a subset, record only the selected cluster names.
-- Use the same cluster names when comparing manual results to script output.
+- Record the Element IP/FQDN and cluster name.
+- Use the same network names and UUIDs when comparing manual results to script output.
 
 ## Step-by-Step Procedure
 
-### Step 1: Validate subnet and VLAN mapping in Prism
+### Step 1: Validate network and VLAN mapping in Prism Element
 
-1. Open Prism Central.
-2. Go to Networks/Subnets.
-3. Search for the target subnet.
+1. Open Prism Element.
+2. Go to VM networking / networks.
+3. Search for the target AHV network.
 4. Confirm:
-   - Subnet extId
-   - VLAN ID (networkId)
-   - Prefix/mask
-   - Default gateway
-5. Repeat for each subnet you will test.
+   - Network UUID
+   - VLAN ID
+   - Prefix/mask from the test plan
+   - Default gateway from the test plan
+5. Repeat for each network you will test.
 
 Pass criteria:
 
-- VLAN ID and subnet details match your test plan.
+- VLAN ID and network details match your test plan.
 
 ### Step 2: Confirm test VM and host targets
 
@@ -175,7 +174,7 @@ Record result as:
 
 - Cluster
 - Current host
-- Subnet/VLAN
+- Network/VLAN
 - Test IP
 - Gateway
 - Ping result (PASS/FAIL)
@@ -201,17 +200,17 @@ Pass criteria:
 
 - Both pings successful on Host 2 as well.
 
-### Step 9: Repeat for next subnet
+### Step 9: Repeat for next network
 
-1. Re-attach VM NIC to next subnet.
-2. Reconfigure guest IP/route for that subnet.
+1. Re-attach VM NIC to next AHV network.
+2. Reconfigure guest IP/route for that network.
 3. Repeat guest ping, execution-machine ping, and migration checks.
 
 ## Result Interpretation
 
 ### Expected good outcome
 
-- Same subnet passes on all tested hosts.
+- Same network passes on all tested hosts.
 - Indicates VLAN path is consistent for tested hosts.
 
 ### Common failure patterns
@@ -219,8 +218,8 @@ Pass criteria:
 1. Fails on one host, passes on others:
    - Likely host/uplink VLAN path inconsistency.
 
-2. Fails on all hosts for one subnet:
-   - Possible wrong subnet mapping, gateway issue, or blocked path.
+2. Fails on all hosts for one network:
+   - Possible wrong network mapping, gateway issue, or blocked path.
 
 3. Guest IP config fails before ping:
    - Guest-side issue (interface, permissions, route setup).
@@ -237,14 +236,14 @@ When comparing manual vs script output, match on:
 
 - Cluster
 - Host
-- Subnet extId / VLAN ID
+- Network UUID / VLAN ID
 - Test IP
 - Guest-to-gateway probe result
 - Runner-to-guest probe result
 
 If mismatch occurs:
 
-1. Re-check subnet mapping and free IP correctness.
+1. Re-check network mapping and free IP correctness.
 2. Re-run one host manually.
 3. If still mismatched, treat as investigation case.
 
@@ -266,7 +265,7 @@ Don't:
 
 Use this table format:
 
-| Cluster | Host | Subnet Name | VLAN ID | Subnet extId | Test IP | Gateway | Ping Result | Notes |
-|---|---|---|---|---|---|---|---|---|
-| <cluster_name> | <host_name> | <subnet_name> | <vlan_id> | <subnet_extid> | <test_ip> | <gateway_ip> | PASS/FAIL | |
+| Element | Cluster | Host | Network Name | VLAN ID | Network UUID | Test IP | Gateway | Ping Result | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| <element_ip> | <cluster_name> | <host_name> | <network_name> | <vlan_id> | <network_uuid> | <test_ip> | <gateway_ip> | PASS/FAIL | |
 
