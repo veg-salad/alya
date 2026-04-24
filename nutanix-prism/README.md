@@ -3,7 +3,7 @@
 ## Overview
 
 - Prompts interactively for Prism Central and guest credentials.
-- Reads a CSV containing VLAN/subnet/test-IP rows.
+- Reads a CSV containing VLAN/subnet/test-IP rows and L3 details when Prism does not provide IPAM data.
 - Fetches AHV subnet inventory from Prism Central and validates CSV rows before execution.
 - Prints discovered clusters and asks which clusters to test.
 - Finds one pre-created Windows test VM (same name) in each selected cluster.
@@ -49,6 +49,8 @@ Required columns:
 - `vlan_id`
 - `subnet_extid`
 - `free_ip`
+- `gateway`
+- `prefix_length`
 
 Optional column:
 
@@ -57,14 +59,35 @@ Optional column:
 CSV example:
 
 ```csv
-vlan_id,subnet_extid,free_ip,subnet_name
-100,11111111-2222-3333-4444-555555555555,192.168.100.50,APP_VLAN_100
-200,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,192.168.200.50,DB_VLAN_200
+vlan_id,subnet_extid,free_ip,gateway,prefix_length,subnet_name
+100,11111111-2222-3333-4444-555555555555,192.168.100.50,192.168.100.1,24,APP_VLAN_100
+200,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,192.168.200.50,192.168.200.1,24,DB_VLAN_200
 ```
 
 Notes:
 
 - `subnet_name` is optional and only for operator readability.
+- `gateway` is the default gateway that the Windows guest pings after its NIC is moved to the target subnet.
+- `prefix_length` is the CIDR mask length, for example `24` for `255.255.255.0`.
+- In non-IPAM environments, Prism may return only Layer 2 network information. In that case, `gateway` and `prefix_length` must be supplied in the CSV.
+- `free_ip` must be an unused address in the target subnet. The tool does not reserve or allocate IPs.
+
+## Prism Inventory vs CSV Input
+
+The tool fetches these details from Prism Central:
+
+- clusters and hosts
+- VM inventory and test VM NIC details
+- AHV subnet extId, VLAN ID, subnet name, cluster references, bridge, and virtual switch references
+- Prism IP configuration when available
+
+The CSV must provide these operator-owned values:
+
+- `free_ip`
+- `gateway`
+- `prefix_length`
+
+For environments where Prism does not manage IPAM for AHV VLANs, the CSV values are the source of truth for guest IP configuration and gateway probe behavior.
 
 ## Execution
 
@@ -128,7 +151,7 @@ Before running tests, the tool validates each CSV row against Prism subnet inven
 
 - `subnet_extid` must exist
 - `vlan_id` must match subnet `networkId`
-- subnet must include gateway + prefix info
+- each subnet row must have gateway + prefix info, either from Prism IP configuration or from CSV columns
 
 During execution, the tool also validates cluster scope:
 

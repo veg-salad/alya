@@ -57,6 +57,22 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def log_stage(stage: str, message: str) -> None:
+    print(f"[{now_utc()}] [{stage}] {message}")
+
+
+def log_progress(stage: str, current: int, total: int, message: str, width: int = 24) -> None:
+    if total <= 0:
+        bar = "-" * width
+        percent = 0
+    else:
+        current = max(0, min(current, total))
+        filled = int(width * current / total)
+        bar = "#" * filled + "-" * (width - filled)
+        percent = int(100 * current / total)
+    print(f"[{now_utc()}] [{stage}] [{bar}] {current}/{total} {percent:3d}% {message}")
+
+
 def prompt_non_empty(text: str) -> str:
     while True:
         value = input(text).strip()
@@ -166,7 +182,13 @@ def api_put(session: requests.Session, path: str, timeout: int, payload: Dict[st
     return res.json() if res.text.strip() else {}
 
 
-def list_all(session: requests.Session, path: str, timeout: int, limit: int = 100) -> List[Dict[str, Any]]:
+def list_all(
+    session: requests.Session,
+    path: str,
+    timeout: int,
+    limit: int = 100,
+    label: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     page = 0
     while True:
@@ -177,6 +199,8 @@ def list_all(session: requests.Session, path: str, timeout: int, limit: int = 10
         rows.extend(batch)
         meta = payload.get("metadata", {})
         total = int(meta.get("totalAvailableResults", len(rows)))
+        if label:
+            log_progress("FETCH", len(rows), total, f"{label} page={page}")
         if len(rows) >= total or len(batch) < limit:
             break
         page += 1
@@ -282,7 +306,7 @@ def run_windows_ps(host: str, username: str, password: str, script: str, timeout
 def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
-        required = {"vlan_id", "subnet_extid", "free_ip"}
+        required = {"vlan_id", "subnet_extid", "free_ip", "gateway", "prefix_length"}
         if not reader.fieldnames:
             raise RuntimeError("CSV has no header row")
 
@@ -300,6 +324,10 @@ def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
                 raise RuntimeError(f"CSV line {i}: vlan_id is required")
             if not cleaned.get("free_ip"):
                 raise RuntimeError(f"CSV line {i}: free_ip is required")
+            if not cleaned.get("gateway"):
+                raise RuntimeError(f"CSV line {i}: gateway is required")
+            if not cleaned.get("prefix_length"):
+                raise RuntimeError(f"CSV line {i}: prefix_length is required")
             rows.append(cleaned)
 
         if not rows:
@@ -307,7 +335,20 @@ def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
         return rows
 
 
-def build_subnet_tests(csv_rows: List[Dict[str, str]], subnets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def parse_prefix_length(value: str, row_num: int) -> int:
+    try:
+        prefix = int(value)
+    except ValueError:
+        raise RuntimeError(f"CSV row {row_num}: prefix_length must be an integer")
+    if prefix < 1 or prefix > 32:
+        raise RuntimeError(f"CSV row {row_num}: prefix_length must be between 1 and 32")
+    return prefix
+
+
+def build_subnet_tests(
+    csv_rows: List[Dict[str, str]],
+    subnets: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     by_extid = {s.get("extId"): s for s in subnets if s.get("extId")}
     tests: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -329,17 +370,39 @@ def build_subnet_tests(csv_rows: List[Dict[str, str]], subnets: List[Dict[str, A
             )
             continue
 
+        prefix = 0
+        gateway = ""
         ip_cfg_list = subnet.get("ipConfig", [])
         if not ip_cfg_list:
-            errors.append(f"Row {idx}: subnet_extid {subnet_extid} has no ipConfig")
-            continue
-
-        ipv4 = ip_cfg_list[0].get("ipv4", {})
-        prefix = ipv4.get("ipSubnet", {}).get("prefixLength")
-        gateway = ipv4.get("defaultGatewayIp", {}).get("value")
-        if prefix is None or not gateway:
-            errors.append(f"Row {idx}: subnet_extid {subnet_extid} missing prefix or default gateway")
-            continue
+            gateway = row.get("gateway", "")
+            prefix_length = row.get("prefix_length", "")
+            if not gateway or not prefix_length:
+                errors.append(
+                    f"Row {idx}: subnet_extid {subnet_extid} has no Prism ipConfig; "
+                    "CSV gateway and prefix_length are required"
+                )
+                continue
+            try:
+                prefix = parse_prefix_length(prefix_length, idx)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                continue
+        else:
+            ipv4 = ip_cfg_list[0].get("ipv4", {})
+            prefix = ipv4.get("ipSubnet", {}).get("prefixLength")
+            gateway = ipv4.get("defaultGatewayIp", {}).get("value")
+            if prefix is None or not gateway:
+                csv_gateway = row.get("gateway", "")
+                csv_prefix = row.get("prefix_length", "")
+                if not csv_gateway or not csv_prefix:
+                    errors.append(f"Row {idx}: subnet_extid {subnet_extid} missing prefix or default gateway")
+                    continue
+                gateway = csv_gateway
+                try:
+                    prefix = parse_prefix_length(csv_prefix, idx)
+                except RuntimeError as exc:
+                    errors.append(str(exc))
+                    continue
 
         cluster_extids: List[str] = []
         for extid in subnet.get("clusterReferenceList", []) or []:
@@ -462,14 +525,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print("AHV VLAN Validator (Interactive)")
+    log_stage("START", "AHV VLAN Validator (Interactive)")
     pc_host = prompt_non_empty("Prism Central IP/FQDN: ")
     pc_user = prompt_non_empty("Prism Username: ")
     pc_pass = getpass.getpass("Prism Password: ")
     vm_name = prompt_non_empty("Windows Test VM Name (same name across clusters): ")
     guest_user = prompt_non_empty("Windows Guest Username: ")
     guest_pass = getpass.getpass("Windows Guest Password: ")
-    csv_path = prompt_non_empty("Path to subnet CSV (vlan_id,subnet_extid,free_ip): ")
+    csv_path = prompt_non_empty("Path to subnet CSV (vlan_id,subnet_extid,free_ip,gateway,prefix_length): ")
     report_path = input("Report CSV path [vlan_test_report.csv]: ").strip() or "vlan_test_report.csv"
     verify_tls = prompt_yes_no("Verify TLS certificates", default=False)
 
@@ -482,14 +545,21 @@ def main() -> int:
     run_id = str(uuid.uuid4())
     session = init_session(pc_host, pc_user, pc_pass, verify_tls)
 
-    print(f"[{now_utc()}] Fetching Prism inventory")
-    clusters = list_all(session, API_PATHS["clusters"], api_timeout)
-    hosts = list_all(session, API_PATHS["hosts"], api_timeout)
-    subnets = list_all(session, API_PATHS["subnets"], api_timeout)
-    vms = list_all(session, API_PATHS["vms"], api_timeout)
+    log_stage("INVENTORY", "Fetching clusters, hosts, subnets, and VMs from Prism Central")
+    clusters = list_all(session, API_PATHS["clusters"], api_timeout, label="clusters")
+    hosts = list_all(session, API_PATHS["hosts"], api_timeout, label="hosts")
+    subnets = list_all(session, API_PATHS["subnets"], api_timeout, label="subnets")
+    vms = list_all(session, API_PATHS["vms"], api_timeout, label="vms")
+    log_stage(
+        "INVENTORY",
+        f"Fetched clusters={len(clusters)} hosts={len(hosts)} subnets={len(subnets)} vms={len(vms)}",
+    )
 
+    log_stage("VALIDATION", f"Reading subnet CSV: {csv_path}")
     csv_rows = parse_subnet_csv(csv_path)
+    log_stage("VALIDATION", f"Loaded {len(csv_rows)} CSV subnet rows")
     subnet_tests = build_subnet_tests(csv_rows, subnets)
+    log_stage("VALIDATION", f"Validated {len(subnet_tests)} subnet rows against Prism inventory")
 
     selected_clusters = prompt_cluster_selection(clusters)
     print("Selected clusters:")
@@ -509,17 +579,18 @@ def main() -> int:
         row["run_id"] = run_id
         report_rows.append(row)
 
-    print(f"[{now_utc()}] Run ID: {run_id}")
-    print(f"[{now_utc()}] Planned clusters: {len(selected_clusters)} of {len(clusters)} discovered")
-    print(f"[{now_utc()}] Planned subnet rows: {len(subnet_tests)}")
+    log_stage("PLAN", f"Run ID: {run_id}")
+    log_stage("PLAN", f"Planned clusters: {len(selected_clusters)} of {len(clusters)} discovered")
+    log_stage("PLAN", f"Planned subnet rows: {len(subnet_tests)}")
     for test in subnet_tests:
-        print(
-            f"  - subnet={test['subnet_name']} vlan={test['vlan_id']} "
-            f"extId={test['subnet_extid']} ip={test['free_ip']} gw={test['gateway']}"
+        log_stage(
+            "PLAN",
+            f"subnet={test['subnet_name']} vlan={test['vlan_id']} "
+            f"extId={test['subnet_extid']} ip={test['free_ip']} gw={test['gateway']}/{test['prefix']}",
         )
 
     if args.preflight_only:
-        print(f"[{now_utc()}] Preflight only selected. No changes will be made.")
+        log_stage("PREFLIGHT", "Preflight only selected. No changes will be made.")
         out = Path(report_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         fields = [
@@ -540,23 +611,27 @@ def main() -> int:
         with out.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
             writer.writeheader()
-        print(f"[{now_utc()}] Wrote report skeleton: {out}")
+        log_stage("REPORT", f"Wrote report skeleton: {out}")
         return 0
 
     if not args.dry_run and input("Type YES to execute this plan: ").strip() != "YES":
-        print("Execution cancelled by user.")
+        log_stage("CANCELLED", "Execution cancelled by user.")
         return 0
 
-    for cluster in selected_clusters:
+    for cluster_index, cluster in enumerate(selected_clusters, start=1):
         cluster_name = cluster.get("name", "")
         cluster_extid = cluster.get("extId", "")
+        log_progress("CLUSTERS", cluster_index, len(selected_clusters), f"cluster={cluster_name or '<unnamed>'}")
         if not cluster_extid:
+            log_stage("CLUSTER", f"Skipping cluster with missing extId: {cluster_name}")
             continue
 
         cluster_hosts = hosts_by_cluster.get(cluster_extid, [])
         if not cluster_hosts:
-            print(f"[{now_utc()}] Skip {cluster_name}: no hosts")
+            log_stage("CLUSTER", f"Skipping {cluster_name}: no hosts discovered")
             continue
+
+        log_stage("CLUSTER", f"Starting cluster {cluster_name} with {len(cluster_hosts)} hosts")
 
         vm_matches = [
             vm
@@ -565,6 +640,7 @@ def main() -> int:
         ]
 
         if len(vm_matches) != 1:
+            log_stage("VM", f"{cluster_name}: expected one VM named {vm_name}, found {len(vm_matches)}")
             record(
                 {
                     "cluster": cluster_name,
@@ -583,6 +659,7 @@ def main() -> int:
             continue
 
         vm_extid = vm_matches[0].get("extId", "")
+        log_stage("VM", f"{cluster_name}: matched test VM {vm_name} ({vm_extid})")
         vm_full = get_vm(session, vm_extid, api_timeout)
         vm_nics = vm_full.get("nics", [])
 
@@ -603,10 +680,11 @@ def main() -> int:
                     "detail": f"Test VM must have exactly 1 NIC; found {len(vm_nics)}",
                 }
             )
-            print(f"[{now_utc()}] Skip {cluster_name}: VM has {len(vm_nics)} NICs (only 1 allowed)")
+            log_stage("VM", f"Skipping {cluster_name}: VM has {len(vm_nics)} NICs; exactly one is required")
             continue
 
         nic_extid = vm_nics[0].get("extId", "")
+        log_stage("VM", f"{cluster_name}: using VM NIC {nic_extid}")
 
         if args.confirm_vm_per_cluster:
             print(
@@ -635,10 +713,21 @@ def main() -> int:
                 )
                 continue
 
-        print(f"[{now_utc()}] Cluster {cluster_name}: {len(subnet_tests)} subnet rows, {len(cluster_hosts)} hosts")
+        log_stage("CLUSTER", f"{cluster_name}: processing {len(subnet_tests)} subnet rows")
 
-        for test in subnet_tests:
+        for subnet_index, test in enumerate(subnet_tests, start=1):
+            log_progress(
+                "SUBNETS",
+                subnet_index,
+                len(subnet_tests),
+                f"cluster={cluster_name} vlan={test['vlan_id']} subnet={test['subnet_name']}",
+            )
+            log_stage(
+                "SUBNET",
+                f"{cluster_name}: vlan={test['vlan_id']} subnet={test['subnet_name']} extId={test['subnet_extid']}",
+            )
             if test["cluster_extids"] and cluster_extid not in test["cluster_extids"]:
+                log_stage("SUBNET", f"{cluster_name}: subnet is outside cluster scope; recording failure")
                 record(
                     {
                         "cluster": cluster_name,
@@ -657,6 +746,7 @@ def main() -> int:
                 continue
 
             if args.dry_run:
+                log_stage("DRY_RUN", f"{cluster_name}: planned only; no VM, NIC, guest, or migration actions executed")
                 record(
                     {
                         "cluster": cluster_name,
@@ -675,10 +765,13 @@ def main() -> int:
                 continue
 
             try:
+                log_stage("NIC", f"{cluster_name}: rebinding test VM NIC to subnet {test['subnet_extid']}")
                 rebind_vm_nic_subnet(session, vm_extid, nic_extid, test["subnet_extid"], api_timeout)
                 time.sleep(settle_seconds)
 
+                log_stage("GUEST", f"{cluster_name}: detecting Windows guest interface using {test['free_ip']}")
                 iface = detect_guest_interface(test["free_ip"], guest_user, guest_pass, ssh_timeout)
+                log_stage("GUEST", f"{cluster_name}: configuring {iface} with {test['free_ip']}/{test['prefix']}")
                 cfg_res = configure_guest_ip(
                     test["free_ip"],
                     guest_user,
@@ -692,6 +785,7 @@ def main() -> int:
                 if cfg_res["exit_code"] != 0:
                     raise RuntimeError(cfg_res["stderr"] or cfg_res["stdout"] or "Guest IP config failed")
             except Exception as exc:
+                log_stage("GUEST", f"{cluster_name}: guest preparation failed: {exc}")
                 record(
                     {
                         "cluster": cluster_name,
@@ -709,11 +803,19 @@ def main() -> int:
                 )
                 continue
 
-            for host in cluster_hosts:
+            for host_index, host in enumerate(cluster_hosts, start=1):
                 host_name = host.get("hostName", "")
                 host_extid = host.get("extId", "")
+                log_progress(
+                    "HOSTS",
+                    host_index,
+                    len(cluster_hosts),
+                    f"cluster={cluster_name} host={host_name or host_extid}",
+                )
+                log_stage("HOST", f"{cluster_name}: testing host {host_name} ({host_extid})")
 
                 try:
+                    log_stage("MIGRATE", f"{cluster_name}: migrating test VM to host {host_name}")
                     migrate_vm_to_host(session, vm_extid, host_extid, api_timeout)
 
                     start = time.time()
@@ -729,7 +831,9 @@ def main() -> int:
                     if not placed:
                         raise RuntimeError("Timed out waiting for host placement")
 
+                    log_stage("MIGRATE", f"{cluster_name}: VM placement confirmed on {host_name}")
                     time.sleep(settle_seconds)
+                    log_stage("PROBE", f"{cluster_name}: pinging gateway {test['gateway']} from guest")
                     ping_res = ping_gateway(
                         test["free_ip"],
                         guest_user,
@@ -739,11 +843,17 @@ def main() -> int:
                         ping_count,
                     )
 
+                    log_stage("PROBE", f"{cluster_name}: pinging guest test IP {test['free_ip']} from runner")
                     runner_ping = ping_guest_from_runner(test["free_ip"], ping_count)
 
                     guest_ok = ping_res["exit_code"] == 0
                     runner_ok = runner_ping["exit_code"] == 0
                     ok = guest_ok and runner_ok
+                    log_stage(
+                        "RESULT",
+                        f"{cluster_name}/{host_name}: {'PASS' if ok else 'FAIL'} "
+                        f"guest_gateway={'PASS' if guest_ok else 'FAIL'} runner_to_guest={'PASS' if runner_ok else 'FAIL'}",
+                    )
 
                     guest_detail = (ping_res["stderr"] or ping_res["stdout"]).strip()
                     runner_detail = (runner_ping["stderr"] or runner_ping["stdout"]).strip()
@@ -768,6 +878,7 @@ def main() -> int:
                         }
                     )
                 except Exception as exc:
+                    log_stage("ERROR", f"{cluster_name}/{host_name}: runtime failure: {exc}")
                     record(
                         {
                             "cluster": cluster_name,
@@ -808,7 +919,8 @@ def main() -> int:
             writer.writerow(row)
 
     failures = sum(1 for row in report_rows if row.get("status") == "FAIL")
-    print(f"[{now_utc()}] Completed. Rows={len(report_rows)} Failures={failures} Report={out}")
+    log_stage("REPORT", f"Wrote report: {out}")
+    log_stage("DONE", f"Completed. Rows={len(report_rows)} Failures={failures}")
     return 1 if failures else 0
 
 
