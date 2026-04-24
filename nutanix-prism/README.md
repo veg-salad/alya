@@ -73,6 +73,7 @@ Notes:
 - To override the default mask per row, provide either `prefix_length` such as `24`, or `subnet_mask` such as `255.255.255.0`.
 - In non-IPAM environments, Prism may return only Layer 2 network information. In that case, `gateway` must be supplied in the CSV, and the prompted default prefix is used unless overridden.
 - `free_ip` must be an unused address in the target network. The tool does not reserve or allocate IPs.
+- Rows with any required field missing (`vlan_id`, `subnet_extid`, `free_ip`, `gateway`) are **skipped** rather than aborting execution. Skipped rows appear in the report with `status=SKIPPED` and a description of the missing field(s) in the `detail` column.
 
 ## Prism Inventory vs CSV Input
 
@@ -156,8 +157,16 @@ Before running tests, the tool validates each CSV row against the current Prism 
 
 - `subnet_extid` must exist as an Element network UUID
 - `vlan_id` must match the Element network `vlan_id`
-- each CSV row must have gateway info, either from Prism IP configuration or from the CSV `gateway` column
+- each CSV row must have `free_ip` and `gateway` populated
 - mask information comes from Prism when available, otherwise from CSV `prefix_length` / `subnet_mask`, otherwise the prompted default prefix
+
+Rows that fail any of these checks are **skipped individually** — they do not halt the run. Skipped rows appear in the report with:
+
+- `status`: `SKIPPED`
+- `stage`: `csv_validation`
+- `detail`: reason (e.g. `missing required field(s): free_ip, gateway` or `VLAN mismatch`)
+
+Only rows that pass validation are tested. If all rows for a cluster are invalid, no tests run for that cluster but other clusters are still processed.
 
 VM targeting controls:
 
@@ -169,8 +178,6 @@ Execution confirmation controls:
 
 - non-dry-run execution requires a `YES` confirmation for each Element plan
 - optional `--confirm-vm-per-element` requires `YES` per Element and prints VM UUID/NIC UUID
-
-If any row fails validation, execution stops immediately.
 
 Probe behavior per migrated host:
 

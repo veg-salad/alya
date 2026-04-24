@@ -293,26 +293,18 @@ def run_windows_ps(host: str, username: str, password: str, script: str, timeout
 def parse_subnet_csv(csv_path: str) -> List[Dict[str, str]]:
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
-        required = {"vlan_id", "subnet_extid", "free_ip", "gateway"}
+        required_columns = {"vlan_id", "subnet_extid", "free_ip", "gateway"}
         if not reader.fieldnames:
             raise RuntimeError("CSV has no header row")
 
         header = {h.strip() for h in reader.fieldnames if h}
-        missing = required - header
+        missing = required_columns - header
         if missing:
             raise RuntimeError(f"CSV missing required columns: {', '.join(sorted(missing))}")
 
         rows: List[Dict[str, str]] = []
-        for i, row in enumerate(reader, start=2):
+        for row in reader:
             cleaned = {k.strip(): (v or "").strip() for k, v in row.items() if k}
-            if not cleaned.get("subnet_extid"):
-                raise RuntimeError(f"CSV line {i}: subnet_extid is required")
-            if not cleaned.get("vlan_id"):
-                raise RuntimeError(f"CSV line {i}: vlan_id is required")
-            if not cleaned.get("free_ip"):
-                raise RuntimeError(f"CSV line {i}: free_ip is required")
-            if not cleaned.get("gateway"):
-                raise RuntimeError(f"CSV line {i}: gateway is required")
             rows.append(cleaned)
 
         if not rows:
@@ -360,36 +352,75 @@ def build_network_tests(
     csv_rows: List[Dict[str, str]],
     networks: List[Dict[str, Any]],
     default_prefix_length: int,
-) -> List[Dict[str, Any]]:
+) -> tuple:
+    """Return (tests, skipped) where skipped rows each carry a 'skip_reason' key."""
     by_uuid = {n.get("uuid"): n for n in networks if n.get("uuid")}
     tests: List[Dict[str, Any]] = []
-    errors: List[str] = []
+    skipped: List[Dict[str, Any]] = []
 
     for idx, row in enumerate(csv_rows, start=1):
-        network_uuid = row["subnet_extid"]
-        expected_vlan = str(row["vlan_id"])
-        free_ip = row["free_ip"]
+        network_uuid = row.get("subnet_extid", "").strip()
+        expected_vlan = row.get("vlan_id", "").strip()
+        free_ip = row.get("free_ip", "").strip()
+        gateway = row.get("gateway", "").strip()
+
+        missing_fields = [
+            f for f, v in [
+                ("subnet_extid", network_uuid),
+                ("vlan_id", expected_vlan),
+                ("free_ip", free_ip),
+                ("gateway", gateway),
+            ]
+            if not v
+        ]
+        if missing_fields:
+            skipped.append({
+                "vlan_id": expected_vlan,
+                "subnet_extid": network_uuid,
+                "free_ip": free_ip,
+                "gateway": gateway,
+                "subnet_name": "",
+                "skip_reason": f"Row {idx}: missing required field(s): {', '.join(missing_fields)}",
+            })
+            continue
 
         network = by_uuid.get(network_uuid)
         if not network:
-            errors.append(f"Row {idx}: subnet_extid {network_uuid} not found in Prism Element network inventory")
+            skipped.append({
+                "vlan_id": expected_vlan,
+                "subnet_extid": network_uuid,
+                "free_ip": free_ip,
+                "gateway": gateway,
+                "subnet_name": "",
+                "skip_reason": f"Row {idx}: subnet_extid {network_uuid} not found in Prism Element network inventory",
+            })
             continue
 
         actual_vlan = str(network.get("vlan_id", ""))
         if expected_vlan != actual_vlan:
-            errors.append(
-                f"Row {idx}: subnet_extid {network_uuid} VLAN mismatch. CSV={expected_vlan}, Prism Element={actual_vlan}"
-            )
+            skipped.append({
+                "vlan_id": expected_vlan,
+                "subnet_extid": network_uuid,
+                "free_ip": free_ip,
+                "gateway": gateway,
+                "subnet_name": network.get("name", ""),
+                "skip_reason": (
+                    f"Row {idx}: VLAN mismatch — CSV={expected_vlan}, Prism Element={actual_vlan}"
+                ),
+            })
             continue
 
-        gateway = row.get("gateway", "")
-        if not gateway:
-            errors.append(f"Row {idx}: gateway is required")
-            continue
         try:
             prefix = csv_prefix_length(row, idx, default_prefix_length)
         except RuntimeError as exc:
-            errors.append(str(exc))
+            skipped.append({
+                "vlan_id": expected_vlan,
+                "subnet_extid": network_uuid,
+                "free_ip": free_ip,
+                "gateway": gateway,
+                "subnet_name": network.get("name", ""),
+                "skip_reason": str(exc),
+            })
             continue
 
         tests.append(
@@ -403,10 +434,7 @@ def build_network_tests(
             }
         )
 
-    if errors:
-        raise RuntimeError("Validation failed:\n- " + "\n- ".join(errors))
-
-    return tests
+    return tests, skipped
 
 
 def detect_guest_interface(host: str, user: str, password: str, timeout: int) -> str:
@@ -559,8 +587,30 @@ def main() -> int:
             f"{cluster_name}: fetched hosts={len(hosts)} networks={len(networks)} vms={len(vms)}",
         )
 
-        subnet_tests = build_network_tests(csv_rows, networks, default_prefix_length)
-        log_stage("VALIDATION", f"{cluster_name}: validated {len(subnet_tests)} CSV rows against Element networks")
+        subnet_tests, skipped_rows = build_network_tests(csv_rows, networks, default_prefix_length)
+        log_stage(
+            "VALIDATION",
+            f"{cluster_name}: {len(subnet_tests)} row(s) to test, {len(skipped_rows)} skipped",
+        )
+        for skip in skipped_rows:
+            log_stage("SKIP", f"{cluster_name}: {skip['skip_reason']}")
+            record(
+                {
+                    "cluster": cluster_name,
+                    "host": "",
+                    "test_vm": vm_name,
+                    "vlan_id": skip.get("vlan_id", ""),
+                    "subnet": skip.get("subnet_name", ""),
+                    "subnet_extid": skip.get("subnet_extid", ""),
+                    "test_ip": skip.get("free_ip", ""),
+                    "gateway": skip.get("gateway", ""),
+                    "status": "SKIPPED",
+                    "stage": "csv_validation",
+                    "detail": skip["skip_reason"],
+                },
+                element_host,
+                cluster,
+            )
         for test in subnet_tests:
             log_stage(
                 "PLAN",
