@@ -7,10 +7,6 @@ Primary blueprint:
 - PowerShell and shell-driven operations for day-to-day administration
 - Focus on practical runbooks and operator-friendly execution
 
-Also included:
-
-- Targeted Python automation where API-centric workflows are a better fit
-
 Current areas covered:
 
 - **Active Directory Domain Services (AD DS)** administration and automation
